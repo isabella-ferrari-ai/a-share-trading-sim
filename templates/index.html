@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股短线模拟盘 · 情绪龙头 + 连板战法</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script>
+tailwind.config = {
+  theme: { extend: {
+    colors: {
+      bg: '#0a0e17', panel: '#121826', panel2: '#1a2234', line: '#26304a',
+      up: '#ff4d4f', down: '#13c2a2', accent: '#fa8c16', muted: '#8a96ab'
+    },
+    fontFamily: { mono: ['ui-monospace','SFMono-Regular','Menlo','monospace'] }
+  }}
+}
+</script>
+<style>
+  body{background:#0a0e17;color:#e6edf7}
+  .card{background:linear-gradient(180deg,#141b2b,#10151f);border:1px solid #222c44;border-radius:16px}
+  .glow{box-shadow:0 0 0 1px rgba(250,140,22,.15),0 8px 30px rgba(0,0,0,.35)}
+  ::-webkit-scrollbar{height:8px;width:8px}
+  ::-webkit-scrollbar-thumb{background:#26304a;border-radius:8px}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px}
+  .pulse{animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  table{border-collapse:collapse}
+  .num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body class="min-h-screen">
+<div class="max-w-7xl mx-auto px-3 sm:px-5 py-4 sm:py-6">
+
+  <!-- Header -->
+  <header class="flex flex-wrap items-center justify-between gap-3 mb-5">
+    <div>
+      <h1 class="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+        <span class="text-accent">▲</span> A股短线模拟盘
+      </h1>
+      <p class="text-muted text-xs sm:text-sm mt-1">情绪龙头法 + 连板战法 · 模拟资金 ¥100万 · T+1 · 每15分钟盘中扫描</p>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-muted">
+      <span id="regime-badge" class="tag bg-panel2 border border-line">市场: —</span>
+      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-down pulse"></span><span id="clock">--:--:--</span></span>
+    </div>
+  </header>
+
+  <!-- KPI cards -->
+  <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+    <div class="card glow p-4">
+      <div class="text-muted text-xs">总资产</div>
+      <div id="kpi-total" class="text-2xl font-bold num mt-1">¥—</div>
+      <div id="kpi-cum" class="text-xs mt-1 num">—</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-muted text-xs">今日盈亏</div>
+      <div id="kpi-today" class="text-2xl font-bold num mt-1">—</div>
+      <div class="text-xs mt-1 text-muted">日收益率</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-muted text-xs">可用现金 / 持仓市值</div>
+      <div id="kpi-cash" class="text-lg font-bold num mt-1">¥—</div>
+      <div id="kpi-mv" class="text-xs mt-1 text-muted num">市值 ¥—</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-muted text-xs">胜率 / 持仓</div>
+      <div id="kpi-win" class="text-lg font-bold num mt-1">—</div>
+      <div id="kpi-pos" class="text-xs mt-1 text-muted num">持仓 —/3</div>
+    </div>
+  </section>
+
+  <!-- Equity chart -->
+  <section class="card p-4 mb-5">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="font-semibold text-sm">资产净值曲线</h2>
+      <div class="text-xs text-muted">已实现 <span id="realized" class="num">—</span> · 浮动 <span id="floating" class="num">—</span></div>
+    </div>
+    <div id="equity-chart" style="height:300px"></div>
+  </section>
+
+  <div class="grid lg:grid-cols-2 gap-5 mb-5">
+    <!-- Positions -->
+    <section class="card p-4">
+      <h2 class="font-semibold text-sm mb-3">当前持仓</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs sm:text-sm">
+          <thead class="text-muted text-left">
+            <tr class="border-b border-line">
+              <th class="py-2 pr-2">股票</th><th class="pr-2">成本</th><th class="pr-2">现价</th>
+              <th class="pr-2">浮盈</th><th class="pr-2">天数</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body"><tr><td colspan="5" class="py-6 text-center text-muted">暂无持仓</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Market sentiment -->
+    <section class="card p-4">
+      <h2 class="font-semibold text-sm mb-3">今日市场情绪</h2>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div class="bg-panel2 rounded-xl p-3">
+          <div class="text-muted text-xs">涨停板数量</div>
+          <div id="sent-limitup" class="text-2xl font-bold num">—</div>
+          <div class="text-[10px] text-muted">>80强 · 40-80中 · <40弱</div>
+        </div>
+        <div class="bg-panel2 rounded-xl p-3">
+          <div class="text-muted text-xs">两市成交额</div>
+          <div id="sent-amount" class="text-2xl font-bold num">—</div>
+          <div class="text-[10px] text-muted">>1.5万亿强 · <1万亿弱</div>
+        </div>
+        <div class="bg-panel2 rounded-xl p-3">
+          <div class="text-muted text-xs">上证指数</div>
+          <div id="sent-index" class="text-xl font-bold num">—</div>
+        </div>
+        <div class="bg-panel2 rounded-xl p-3">
+          <div class="text-muted text-xs">操作建议</div>
+          <div id="sent-tradable" class="text-xl font-bold">—</div>
+        </div>
+      </div>
+      <div id="sentiment-chart" style="height:140px"></div>
+    </section>
+  </div>
+
+  <div class="grid lg:grid-cols-3 gap-5 mb-5">
+    <!-- Scan log -->
+    <section class="card p-4 lg:col-span-1">
+      <h2 class="font-semibold text-sm mb-3 flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-accent pulse"></span>盘中扫描日志 <span class="text-muted text-xs">每15min</span>
+      </h2>
+      <div id="scan-log" class="space-y-2 text-xs max-h-80 overflow-y-auto"></div>
+    </section>
+
+    <!-- Trades -->
+    <section class="card p-4 lg:col-span-2">
+      <h2 class="font-semibold text-sm mb-3">交易明细</h2>
+      <div class="overflow-x-auto max-h-80 overflow-y-auto">
+        <table class="w-full text-xs sm:text-sm">
+          <thead class="text-muted text-left sticky top-0 bg-panel">
+            <tr class="border-b border-line">
+              <th class="py-2 pr-2">日期</th><th class="pr-2">方向</th><th class="pr-2">股票</th>
+              <th class="pr-2">价格</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Watchlist / strategy -->
+  <section class="card p-4 mb-5">
+    <h2 class="font-semibold text-sm mb-3">主题股票池</h2>
+    <div id="watchlist" class="flex flex-wrap gap-2"></div>
+  </section>
+
+  <footer class="text-center text-muted text-[11px] py-4">
+    模拟盘仅用于策略演示，非投资建议 · 数据源 baostock(日线) · 更新于 <span id="updated">—</span>
+  </footer>
+</div>
+
+<script>
+const fmt = n => (n==null?'—':Number(n).toLocaleString('zh-CN',{maximumFractionDigits:2}));
+const sign = n => n>0?'+':'';
+const colorCls = n => n>0?'text-up':(n<0?'text-down':'text-muted');
+const yi = n => n==null?'—':(n/1e4).toFixed(2)+'万亿';
+
+let equityChart, sentChart;
+
+async function j(u){const r=await fetch(u);return r.json();}
+
+async function loadOverview(){
+  const d = await j('/api/overview');
+  document.getElementById('kpi-total').textContent = '¥'+fmt(d.total_equity);
+  const cum = document.getElementById('kpi-cum');
+  cum.textContent = sign(d.cum_return)+d.cum_return+'% 累计'; cum.className='text-xs mt-1 num '+colorCls(d.cum_return);
+  const t = document.getElementById('kpi-today');
+  t.textContent = sign(d.today_return)+d.today_return+'%'; t.className='text-2xl font-bold num mt-1 '+colorCls(d.today_return);
+  document.getElementById('kpi-cash').textContent='¥'+fmt(d.cash);
+  document.getElementById('kpi-mv').textContent='市值 ¥'+fmt(d.market_value);
+  document.getElementById('kpi-win').textContent=d.win_rate+'% ('+d.trade_count+'笔)';
+  document.getElementById('kpi-pos').textContent='持仓 '+d.position_count+'/'+d.max_positions;
+  const rz=document.getElementById('realized'); rz.textContent='¥'+fmt(d.realized_pnl); rz.className='num '+colorCls(d.realized_pnl);
+  const fl=document.getElementById('floating'); fl.textContent='¥'+fmt(d.floating_pnl); fl.className='num '+colorCls(d.floating_pnl);
+  document.getElementById('updated').textContent=d.updated_at||'—';
+}
+
+async function loadEquity(){
+  const data = await j('/api/equity');
+  const dates = data.map(x=>x.trade_date);
+  const eq = data.map(x=>x.total_equity);
+  equityChart.setOption({
+    tooltip:{trigger:'axis',backgroundColor:'#121826',borderColor:'#26304a',textStyle:{color:'#e6edf7'},
+      formatter:p=>{const x=p[0];return x.axisValue+'<br/>总资产 ¥'+fmt(x.data);}},
+    grid:{left:60,right:20,top:20,bottom:30},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:'#26304a'}},axisLabel:{color:'#8a96ab',fontSize:10}},
+    yAxis:{type:'value',scale:true,axisLabel:{color:'#8a96ab',fontSize:10,formatter:v=>(v/1e4).toFixed(0)+'万'},
+      splitLine:{lineStyle:{color:'#1a2234'}}},
+    series:[{type:'line',data:eq,smooth:true,symbol:'none',
+      lineStyle:{color:'#fa8c16',width:2.5},
+      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(250,140,22,.35)'},{offset:1,color:'rgba(250,140,22,0)'}])},
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#8a96ab',type:'dashed'},
+        data:[{yAxis:1000000,label:{formatter:'初始100万',color:'#8a96ab',fontSize:10}}]}}]
+  });
+}
+
+async function loadPositions(){
+  const data = await j('/api/positions');
+  const tb=document.getElementById('positions-body');
+  if(!data.length){tb.innerHTML='<tr><td colspan="5" class="py-6 text-center text-muted">暂无持仓 · 弱势日空仓</td></tr>';return;}
+  tb.innerHTML=data.map(p=>`<tr class="border-b border-line/40">
+    <td class="py-2 pr-2"><div class="font-medium">${p.name}</div><div class="text-[10px] text-muted">${p.theme}</div></td>
+    <td class="pr-2 num">${fmt(p.avg_cost)}</td>
+    <td class="pr-2 num">${fmt(p.last_price)}</td>
+    <td class="pr-2 num ${colorCls(p.float_pnl)}">${sign(p.float_pnl_pct)}${p.float_pnl_pct}%</td>
+    <td class="pr-2 num">${p.days_held}天</td></tr>`).join('');
+}
+
+async function loadTrades(){
+  const data = await j('/api/trades');
+  const tb=document.getElementById('trades-body');
+  tb.innerHTML=data.map(t=>{
+    const sideCls=t.side==='BUY'?'bg-up/20 text-up':'bg-down/20 text-down';
+    const pnl=t.side==='SELL'?`<span class="num ${colorCls(t.pnl)}">${sign(t.pnl_pct)}${t.pnl_pct}%</span>`:'<span class="text-muted">—</span>';
+    return `<tr class="border-b border-line/40">
+      <td class="py-2 pr-2 text-muted whitespace-nowrap">${t.trade_date}</td>
+      <td class="pr-2"><span class="tag ${sideCls}">${t.side==='BUY'?'买入':'卖出'}</span></td>
+      <td class="pr-2 whitespace-nowrap">${t.name||t.code}</td>
+      <td class="pr-2 num">${fmt(t.price)}</td>
+      <td class="pr-2">${pnl}</td>
+      <td class="pr-2 text-muted text-[11px]">${t.reason||''}</td></tr>`;
+  }).join('');
+}
+
+async function loadSentiment(){
+  const d = await j('/api/sentiment');
+  const s=d.latest||{};
+  document.getElementById('sent-limitup').textContent=s.limit_up_count??'—';
+  document.getElementById('sent-amount').textContent=yi(s.total_amount);
+  const ix=document.getElementById('sent-index');
+  ix.textContent=(s.index_pct==null?'—':sign(s.index_pct)+s.index_pct+'%'); ix.className='text-xl font-bold num '+colorCls(s.index_pct);
+  const tr=document.getElementById('sent-tradable');
+  tr.textContent=s.tradable?'可操作':'空仓观望'; tr.className='text-xl font-bold '+(s.tradable?'text-down':'text-accent');
+  const rb=document.getElementById('regime-badge');
+  const rmap={'强市':'text-up border-up','中性':'text-accent border-accent','弱市':'text-down border-down'};
+  rb.textContent='市场: '+(s.regime||'—'); rb.className='tag bg-panel2 border '+(rmap[s.regime]||'border-line');
+  // history bar
+  const h=d.history||[];
+  sentChart.setOption({
+    tooltip:{trigger:'axis',backgroundColor:'#121826',borderColor:'#26304a',textStyle:{color:'#e6edf7'}},
+    grid:{left:30,right:10,top:15,bottom:25},
+    xAxis:{type:'category',data:h.map(x=>x.trade_date.slice(5)),axisLabel:{color:'#8a96ab',fontSize:9},axisLine:{lineStyle:{color:'#26304a'}}},
+    yAxis:{type:'value',axisLabel:{color:'#8a96ab',fontSize:9},splitLine:{lineStyle:{color:'#1a2234'}}},
+    series:[{type:'bar',data:h.map(x=>({value:x.limit_up_count,
+      itemStyle:{color:x.regime==='强市'?'#ff4d4f':(x.regime==='弱市'?'#13c2a2':'#fa8c16')}})),
+      barWidth:'55%'}]
+  });
+}
+
+async function loadScanLog(){
+  const data = await j('/api/scan_log');
+  const el=document.getElementById('scan-log');
+  el.innerHTML=data.map(s=>{
+    const tm=s.ts.replace('T',' ').slice(5,16);
+    return `<div class="border-l-2 border-accent/50 pl-2 py-1">
+      <div class="text-muted text-[10px]">${tm} · ${s.phase||''}</div>
+      <div>${s.message||''}</div></div>`;
+  }).join('')||'<div class="text-muted">暂无扫描记录</div>';
+}
+
+async function loadWatchlist(){
+  const data = await j('/api/watchlist');
+  const themes={};
+  data.forEach(w=>{(themes[w.theme]=themes[w.theme]||[]).push(w.name);});
+  document.getElementById('watchlist').innerHTML=Object.entries(themes).map(([t,arr])=>
+    `<div class="bg-panel2 rounded-xl px-3 py-2">
+      <div class="text-accent text-xs font-medium mb-1">${t}</div>
+      <div class="text-xs text-muted">${arr.join(' · ')}</div></div>`).join('');
+}
+
+function tick(){const d=new Date();document.getElementById('clock').textContent=d.toLocaleTimeString('zh-CN');}
+
+async function refresh(){
+  await Promise.all([loadOverview(),loadEquity(),loadPositions(),loadTrades(),loadSentiment(),loadScanLog()]);
+}
+
+window.addEventListener('load',()=>{
+  equityChart=echarts.init(document.getElementById('equity-chart'));
+  sentChart=echarts.init(document.getElementById('sentiment-chart'));
+  window.addEventListener('resize',()=>{equityChart.resize();sentChart.resize();});
+  loadWatchlist();
+  refresh();
+  tick();setInterval(tick,1000);
+  setInterval(refresh,30000);   // 每30秒刷新一次面板
+});
+</script>
+</body>
+</html>

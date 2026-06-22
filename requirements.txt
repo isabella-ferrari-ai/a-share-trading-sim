@@ -1,0 +1,6 @@
+flask>=3.0
+flask-cors
+waitress
+baostock
+akshare
+pandas

@@ -20,7 +20,7 @@ module.exports = {
       script: "scheduler.py",
       interpreter: PY,
       cwd: CWD,
-      env: { PYTHONWARNINGS: "ignore" },
+      env: { PYTHONWARNINGS: "ignore", SIM_START: "2026-07-01" },
       out_file: CWD + "/logs/scheduler.out.log",
       error_file: CWD + "/logs/scheduler.err.log",
       autorestart: true,

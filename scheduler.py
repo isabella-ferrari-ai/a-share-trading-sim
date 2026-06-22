@@ -1,20 +1,25 @@
 # -*- coding: utf-8 -*-
-"""盘中调度器：A股交易时段内每15分钟扫描一次交易信号。
+"""实时/前向模拟调度器（重构版）——无未来函数。
 
-市场时段：09:30-11:30, 13:00-15:00（北京时间）。
-由于 baostock 仅提供日线（且当日数据收盘后才完整），盘中扫描行为如下：
-- 在每个15分钟节点记录一次扫描日志（scan_log），说明当前阶段与是否有候选信号；
-- 当日数据可得时（收盘后/次日），调用 engine.process_trading_day 落地真实交易；
-- 这样 Dashboard 的"盘中扫描"面板能持续刷新，体现每15分钟的检查节奏。
+设计原则（与回测同一套 engine.process_day 代码路径）：
+- 选股只用 T 日收盘可见数据；买入在 T+1 开盘价执行；
+- 因此真正的"结算"发生在每个交易日【收盘后】：用当日完整日线跑 process_day。
+  · 卖出用当日行情（严格 T+1、跌停顺延）；
+  · 买入用【昨日】候选池在【今日开盘价】成交（开盘价是已发生的真实价格，非未来数据）；
+  · 再用今日收盘数据生成明日候选池。
 
-实盘对接说明：若接入实时 L1 快照（如 akshare 实时行情），可在 _intraday_signals 中替换为
-真实竞价/封板/封单判断，逻辑骨架已就绪。
+盘中（09:30-15:00）：每 15 分钟记录一次监控心跳（scan_log），展示节奏；
+  不做任何用日线冒充盘中信号的成交。日线收盘后(约15:30起)才结算。
+
+数据：
+- 收盘结算：增量刷新本地面板库(panel.db)到今日 -> load_panel -> process_day。
+- 这样 panel.db 随实盘自然增长，无需重复全量抓取。
 """
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
 import time
-import json
 from datetime import datetime
 
 import database as db
@@ -23,6 +28,8 @@ import engine
 import strategy as st
 
 SCAN_INTERVAL = 15 * 60   # 15分钟
+# 前向模拟起始日：2026-07-01 起开始建仓（之前空仓等待）
+SIM_START = os.environ.get("SIM_START", "2026-07-01")
 
 
 def _now():
@@ -31,7 +38,7 @@ def _now():
 
 def is_market_hours(now=None):
     now = now or _now()
-    if now.weekday() >= 5:   # 周末
+    if now.weekday() >= 5:
         return False, "周末休市"
     hm = now.hour * 100 + now.minute
     if 930 <= hm <= 1130:
@@ -47,66 +54,80 @@ def _today():
     return _now().strftime("%Y-%m-%d")
 
 
-def _try_settle_today(bars, index_df, trade_date):
-    """若当日日线已可得（收盘后），跑一次结算落地交易。"""
-    have = any((df["date"] == trade_date).any() for df in bars.values())
-    if have:
-        res = engine.process_trading_day(bars, index_df, trade_date, intraday_log=True)
-        return res
-    return None
+def _refresh_panel_today(td):
+    """收盘后增量刷新面板库到今日（仅抓尚无 td 行的股票），返回是否已有今日数据。"""
+    # 用 build_panel 的增量能力：抓取 [td, td] 但保留 lookback。简单起见复用 build_panel。
+    try:
+        dfetch.build_panel(td, td, lookback_days=40)
+    except Exception as e:
+        db.log_scan("数据刷新异常", f"{repr(e)[:120]}", trade_date=td)
+    pdates = set(dfetch.panel_dates())
+    return td in pdates
+
+
+def settle_close(td):
+    """收盘后结算：刷新面板 -> process_day。仅当 td 是交易日且 >= SIM_START。"""
+    if td < SIM_START:
+        db.log_scan("等待开始", f"{td} 早于模拟起始日{SIM_START}，空仓等待", trade_date=td)
+        return
+    have = _refresh_panel_today(td)
+    if not have:
+        db.log_scan("等待数据", f"{td} 日线数据未就绪(收盘后约15:30更新)，稍后重试", trade_date=td)
+        return
+    # 已结算过则跳过
+    if db.get_sentiment(td):
+        return
+    panel, names = dfetch.load_panel()
+    with dfetch.bs_session():
+        index_df = dfetch.get_index(SIM_START, td)
+        dates = [d for d in dfetch.get_trade_dates(SIM_START, td) if d in set(dfetch.panel_dates())]
+    if td not in dates:
+        db.log_scan("非交易日", f"{td} 非交易日或无数据", trade_date=td)
+        return
+    res = engine.process_day(panel, names, index_df, dates, td, log=True)
+    s = res["sentiment"]
+    db.log_scan("收盘结算完成",
+                f"{td} 情绪[{s['regime']}]涨停{s['limit_up_count']} "
+                f"买{len(res['buys'])}卖{len(res['sells'])}拒{len(res['rejected'])} 明日候选{len(res['candidates'])}",
+                trade_date=td)
 
 
 def scan_once():
     now = _now()
     td = _today()
     in_market, phase = is_market_hours(now)
-    if not in_market:
-        # 非交易时段也记录一次心跳（每小时），避免日志爆炸：仅整点附近
-        if now.minute < 15:
-            db.log_scan("休市", f"{phase}，等待下一个交易时段", trade_date=td)
+
+    if in_market:
+        positions = db.get_positions()
+        held = ",".join(f"{p['name']}({p.get('float_pnl_pct','')})" for p in positions) or "空仓"
+        prev_sent = db.get_sentiment()
+        regime = prev_sent["regime"] if prev_sent else "待结算"
+        cands = db.get_candidates()
+        db.log_scan(phase,
+                    f"{phase} 监控心跳：持仓{len(positions)}/{st.MAX_POSITIONS}[{held}]；"
+                    f"昨日候选{len(cands)}只待开盘执行；参考情绪[{regime}]。"
+                    f"按T日收盘选股/T+1开盘执行模型，收盘后结算",
+                    trade_date=td)
         return
 
-    # 拉取近10天数据用于情绪与（若可得）当日结算
-    start = (now.replace(day=max(1, now.day))).strftime("%Y-%m-%d")
-    try:
-        bars, index_df, dates = dfetch.fetch_all("2026-06-01", td)
-    except Exception as e:
-        db.log_scan("扫描异常", f"数据获取失败: {e}", trade_date=td)
-        return
-
-    has_today = engine._has_data_for(bars, td)
-
-    # 当日数据是否已完整可得（收盘后 baostock 才有当日bar）
-    if has_today:
-        settle = _try_settle_today(bars, index_df, td)
-        if settle and settle.get("sentiment"):
-            sentiment = settle["sentiment"]
-            msg = (f"{phase} 收盘数据已就绪，结算完成：买{len(settle['buys'])}/卖{len(settle['sells'])}，"
-                   f"市场[{sentiment['regime']}]")
-            db.log_scan(phase, msg, signals={"buys": settle["buys"], "sells": settle["sells"]}, trade_date=td)
-            return
-
-    # 盘中（当日数据未完整，baostock 当日盘中无数据）：基于已知持仓输出监控信号
-    positions = db.get_positions()
-    prev_sent = db.get_sentiment()
-    regime_txt = prev_sent["regime"] if prev_sent else "待开盘"
-    held = ",".join(p["name"] for p in positions) or "无"
-    msg = (f"{phase} 扫描股票池{len(dfetch.WATCHLIST)}只寻找高开3-8%+开盘封板龙头；"
-           f"参考上一交易日情绪[{regime_txt}]；当前持仓: {held}"
-           f"（{len(positions)}/{st.MAX_POSITIONS}）。日线数据收盘后更新，届时自动结算交易")
-    db.log_scan(phase, msg, trade_date=td)
+    # 非交易时段：收盘后(15:05之后)尝试结算今日
+    hm = now.hour * 100 + now.minute
+    if now.weekday() < 5 and 1505 <= hm <= 2359:
+        settle_close(td)
+    elif now.minute < 15:
+        db.log_scan("休市", f"{phase}", trade_date=td)
 
 
 def main():
     db.init_db()
-    db.log_scan("启动", f"盘中调度器启动，每{SCAN_INTERVAL//60}分钟扫描一次", trade_date=_today())
+    db.log_scan("启动", f"调度器启动(重构版)：T日收盘选股/T+1开盘执行，每{SCAN_INTERVAL//60}分钟一次，模拟起始{SIM_START}", trade_date=_today())
     print("scheduler started")
     while True:
         try:
             scan_once()
         except Exception as e:
             try:
-                db.log_scan("异常", f"扫描异常: {e}", trade_date=_today())
+                db.log_scan("异常", f"{repr(e)[:120]}", trade_date=_today())
             except Exception:
                 pass
         time.sleep(SCAN_INTERVAL)

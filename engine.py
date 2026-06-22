@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""执行引擎：把策略信号落地为模拟买卖，更新账户/持仓/净值/情绪。
+"""执行引擎（重构版）——T 日收盘选股，T+1 日开盘执行，无未来函数。
 
-提供：
-- execute_buy / execute_sell：撮合并记账
-- process_trading_day：对某一交易日跑完整流程（先卖后买，更新净值）——用于种历史数据和每日收盘结算
-- intraday_scan：盘中每15分钟调用，基于当日已知行情产出信号并（在收盘扫描时）落地交易
+每个交易日 D 的处理顺序（process_day）：
+1. 用 D 日全市场面板计算【真实情绪】（涨停/跌停家数、成交额）并落库；
+2. 卖出：对现有持仓用 D 日行情判定（严格 T+1，跌停无法卖出则顺延）；
+3. 买入执行：取【D 的上一交易日 prev】生成的候选池，在 D 日开盘价买入
+   （prev=信号日 T，D=成交日 T+1）；涨停开盘无法买入则记 rejected；
+4. 选股：用 D 日收盘数据生成【新候选池】（signal_date=D），供下一交易日开盘执行；
+5. 更新净值。
+
+成交价：买入=D开盘价；卖出=策略指定(开盘/收盘/止盈价)。
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -15,7 +20,7 @@ import strategy as st
 import data_fetcher as dfetch
 
 COMMISSION = 0.0003     # 佣金万3
-STAMP_TAX = 0.0005      # 卖出印花税万5(已下调)
+STAMP_TAX = 0.0005      # 卖出印花税万5
 MIN_COMMISSION = 5.0
 
 
@@ -27,8 +32,78 @@ def _sell_cost(amount):
     return max(amount * COMMISSION, MIN_COMMISSION) + amount * STAMP_TAX
 
 
-def execute_buy(code, name, theme, price, trade_date, ts=None, reason=""):
-    """按可用现金与单票20%上限买入。返回交易记录或 None。"""
+def _row_at(panel, code, date):
+    """取 code 在 date 的行(dict)；含 code 字段。无则 None。"""
+    df = panel.get(code)
+    if df is None:
+        return None
+    sub = df[df["date"] == date]
+    if sub.empty:
+        return None
+    r = sub.iloc[0].to_dict()
+    r["code"] = code
+    return r
+
+
+def _prev_date(dates, date):
+    try:
+        i = dates.index(date)
+    except ValueError:
+        return None
+    return dates[i - 1] if i > 0 else None
+
+
+# ==========================================================================
+# 情绪（全市场真实统计）
+# ==========================================================================
+def compute_sentiment(panel, index_df, trade_date):
+    """用全市场面板统计当日真实涨停/跌停家数与成交额。"""
+    limit_up = limit_down = 0
+    total_amount = 0.0
+    counted = 0
+    for code, df in panel.items():
+        sub = df[df["date"] == trade_date]
+        if sub.empty:
+            continue
+        r = sub.iloc[0]
+        if int(r.get("tradestatus", 1)) != 1:
+            continue
+        counted += 1
+        amt = r.get("amount") or 0
+        total_amount += amt
+        limit = dfetch.limit_pct(code)
+        pct = (r.get("pctChg") or 0) / 100.0
+        high = r.get("high") or 0
+        low = r.get("low") or 0
+        close = r.get("close") or 0
+        if pct >= limit - st.LIMIT_BUFFER and high > 0 and (high - close) / high <= st.CLOSE_AT_HIGH_TOL:
+            limit_up += 1
+        elif pct <= -(limit - st.LIMIT_BUFFER) and close > 0 and abs(close - low) / close <= st.CLOSE_AT_HIGH_TOL:
+            limit_down += 1
+    total_amount_yi = round(total_amount / 1e8, 1) if total_amount else None
+    regime, tradable = st.classify_sentiment(limit_up)
+
+    index_pct = index_open_pct = None
+    if index_df is not None and not index_df.empty:
+        irow = index_df[index_df["date"] == trade_date]
+        if not irow.empty:
+            ir = irow.iloc[0]
+            index_pct = round(float(ir["pctChg"]), 2)
+            pc = float(ir["preclose"]) if ir["preclose"] == ir["preclose"] else 0
+            if pc > 0:
+                index_open_pct = round((float(ir["open"]) / pc - 1) * 100, 2)
+    return {
+        "trade_date": trade_date, "limit_up_count": limit_up, "limit_down_count": limit_down,
+        "total_amount": total_amount_yi, "index_pct": index_pct, "index_open_pct": index_open_pct,
+        "regime": regime, "tradable": tradable,
+        "note": f"全市场涨停{limit_up}/跌停{limit_down}(样本{counted}只)",
+    }, index_open_pct
+
+
+# ==========================================================================
+# 撮合
+# ==========================================================================
+def execute_buy(code, name, theme, price, signal_date, execute_date, reason=""):
     acct = db.get_account()
     cash = acct["cash"]
     total_equity = cash + st.position_value(db.get_positions())
@@ -47,20 +122,21 @@ def execute_buy(code, name, theme, price, trade_date, ts=None, reason=""):
     db.set_cash(cash - amount - fee)
     db.upsert_position({
         "code": code, "name": name, "theme": theme, "shares": shares,
-        "avg_cost": price, "open_date": trade_date, "last_price": price,
-        "high_since_open": price, "started": 0,
+        "avg_cost": price, "open_date": execute_date, "signal_date": signal_date,
+        "last_price": price, "high_since_open": price, "started": 0,
     })
     t = {
-        "ts": ts or datetime.now().isoformat(timespec="seconds"),
-        "trade_date": trade_date, "code": code, "name": name, "theme": theme,
-        "side": "BUY", "price": round(price, 3), "shares": shares,
-        "amount": round(amount, 2), "pnl": 0, "pnl_pct": 0, "reason": reason,
+        "ts": execute_date + "T09:30:00", "signal_date": signal_date,
+        "execute_date": execute_date, "trade_date": execute_date,
+        "code": code, "name": name, "theme": theme, "side": "BUY",
+        "price": round(price, 3), "shares": shares, "amount": round(amount, 2),
+        "pnl": 0, "pnl_pct": 0, "status": "FILLED", "reason": reason,
     }
     db.record_trade(t)
     return t
 
 
-def execute_sell(pos, price, trade_date, ts=None, reason=""):
+def execute_sell(pos, price, execute_date, ts=None, reason=""):
     acct = db.get_account()
     shares = pos["shares"]
     amount = shares * price
@@ -71,78 +147,15 @@ def execute_sell(pos, price, trade_date, ts=None, reason=""):
     db.set_cash(acct["cash"] + amount - fee)
     db.remove_position(pos["code"])
     t = {
-        "ts": ts or datetime.now().isoformat(timespec="seconds"),
-        "trade_date": trade_date, "code": pos["code"], "name": pos.get("name"),
-        "theme": pos.get("theme"), "side": "SELL", "price": round(price, 3),
-        "shares": shares, "amount": round(amount, 2),
-        "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2), "reason": reason,
+        "ts": ts or (execute_date + "T15:00:00"), "signal_date": pos.get("signal_date"),
+        "execute_date": execute_date, "trade_date": execute_date,
+        "code": pos["code"], "name": pos.get("name"), "theme": pos.get("theme"),
+        "side": "SELL", "price": round(price, 3), "shares": shares,
+        "amount": round(amount, 2), "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
+        "status": "FILLED", "reason": reason,
     }
     db.record_trade(t)
     return t
-
-
-def _bar_for(bars, code, trade_date, watch):
-    df = bars.get(code)
-    if df is None:
-        return None
-    row = df[df["date"] == trade_date]
-    if row.empty:
-        return None
-    r = row.iloc[0]
-    return {
-        "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]),
-        "close": float(r["close"]), "preclose": float(r["preclose"]),
-        "pctChg": float(r["pctChg"]), "turn": float(r["turn"]) if r["turn"] == r["turn"] else 0,
-        "limit": watch["limit"],
-    }
-
-
-def compute_sentiment(bars, index_df, trade_date):
-    """用股票池作为市场情绪的代理样本计算涨停数/情绪（模拟盘近似）。"""
-    limit_up = 0
-    sample = 0
-    for w in dfetch.WATCHLIST:
-        df = bars.get(w["code"])
-        if df is None:
-            continue
-        row = df[df["date"] == trade_date]
-        if row.empty:
-            continue
-        sample += 1
-        pct = float(row.iloc[0]["pctChg"]) / 100.0
-        if pct >= w["limit"] - 0.005:
-            limit_up += 1
-    # 用样本涨停比例放大到全市场近似（样本~17只 -> 全市场约5000只，比例放大 + 基准噪声）
-    ratio = (limit_up / sample) if sample else 0
-    est_limit_up = int(ratio * 120 + 30)   # 经验映射：让数值落在合理区间
-    # 指数
-    index_pct = None
-    index_open_pct = None
-    if index_df is not None and not index_df.empty:
-        irow = index_df[index_df["date"] == trade_date]
-        if not irow.empty:
-            ir = irow.iloc[0]
-            index_pct = float(ir["pctChg"])
-            pc = float(ir["preclose"]) if ir["preclose"] == ir["preclose"] else 0
-            if pc > 0:
-                index_open_pct = float(ir["open"]) / pc - 1
-    # 全市场成交额代理：用上证成交额(亿)粗略放大
-    total_amount_yi = None
-    if index_df is not None and not index_df.empty:
-        irow = index_df[index_df["date"] == trade_date]
-        if not irow.empty and irow.iloc[0]["amount"] == irow.iloc[0]["amount"]:
-            # 上证指数成分成交额(元)->亿元，再粗略放大到沪深两市
-            sh_amount_yi = float(irow.iloc[0]["amount"]) / 1e8
-            total_amount_yi = sh_amount_yi * 2.3
-    regime, tradable = st.classify_regime(est_limit_up, total_amount_yi)
-    note = f"样本涨停{limit_up}/{sample}"
-    return {
-        "trade_date": trade_date, "limit_up_count": est_limit_up,
-        "total_amount": round(total_amount_yi, 1) if total_amount_yi else None,
-        "index_pct": round(index_pct, 2) if index_pct is not None else None,
-        "index_open_pct": round(index_open_pct * 100, 2) if index_open_pct is not None else None,
-        "regime": regime, "tradable": tradable, "note": note,
-    }, index_open_pct
 
 
 def update_equity(trade_date):
@@ -161,64 +174,103 @@ def update_equity(trade_date):
     })
 
 
-def _has_data_for(bars, trade_date):
-    return any((df["date"] == trade_date).any() for df in bars.values())
+# ==========================================================================
+# 单交易日处理
+# ==========================================================================
+def _sell_price(price_kind, row, sell_p):
+    """根据 price_kind 取实际成交价。"""
+    if price_kind == "open":
+        return row["open"]
+    if price_kind == "close":
+        return row["close"]
+    if price_kind == "target":
+        # 止盈价须在当日 [low, high] 内方可成交
+        return min(max(sell_p, row["low"]), row["high"])
+    return sell_p
 
 
-def process_trading_day(bars, index_df, trade_date, intraday_log=False):
-    """处理某一交易日：更新情绪 -> 先卖(止损止盈) -> 再买(新信号) -> 更新净值。
-    若该日尚无行情数据（如当日盘中、数据未更新），跳过，不写入虚假情绪。"""
-    if not _has_data_for(bars, trade_date):
-        return {"sentiment": None, "sells": [], "buys": [], "skipped": "无当日行情数据"}
-    sentiment, index_open_pct = compute_sentiment(bars, index_df, trade_date)
+def process_day(panel, names, index_df, dates, trade_date, theme_map=None, log=True):
+    """处理交易日 trade_date(=D)。"""
+    theme_map = theme_map or {}
+    # 1) 真实情绪
+    sentiment, index_open_pct = compute_sentiment(panel, index_df, trade_date)
     db.upsert_sentiment(sentiment)
 
     daily_stops = db.trades_count_on(trade_date, side="SELL", reason_like="止损")
-    sells, buys = [], []
+    sells, buys, rejected = [], [], []
 
-    # ---- 先处理卖出 ----
+    # 2) 卖出（先更新持仓状态，再判定）
     for pos in db.get_positions():
-        watch = next((w for w in dfetch.WATCHLIST if w["code"] == pos["code"]), {"limit": 0.10})
-        bar = _bar_for(bars, pos["code"], trade_date, watch)
-        if bar is None:
+        row = _row_at(panel, pos["code"], trade_date)
+        if row is None:
             continue
-        # 更新持仓最新价/最高价/启动状态
-        high_since = max(pos.get("high_since_open") or pos["avg_cost"], bar["high"])
-        started = 1 if (high_since / pos["avg_cost"] - 1) >= 0.08 else pos.get("started", 0)
-        db.update_position_price(pos["code"], bar["close"], high_since, started)
-        pos["last_price"] = bar["close"]
+        high_since = max(pos.get("high_since_open") or pos["avg_cost"], row["high"])
+        started = 1 if (high_since / pos["avg_cost"] - 1) >= st.STARTED_GAIN else pos.get("started", 0)
+        db.update_position_price(pos["code"], row["close"], high_since, started)
         pos["high_since_open"] = high_since
         pos["started"] = started
-        do_sell, sell_p, reason = st.evaluate_sell(pos, bar, trade_date)
-        if do_sell:
-            t = execute_sell(pos, sell_p, trade_date, reason=reason)
-            if t:
-                sells.append(t)
-                if "止损" in reason:
-                    daily_stops += 1
+        do_sell, sell_p, reason, price_kind = st.evaluate_sell(pos, row, trade_date)
+        if not do_sell:
+            continue
+        can, sreason = st.can_sell_at(row, price_kind)
+        if not can:
+            db.record_rejected({"signal_date": pos.get("signal_date"), "attempt_date": trade_date,
+                                 "code": pos["code"], "name": pos.get("name"), "side": "SELL",
+                                 "reason": f"{reason} 但{sreason}，顺延"})
+            rejected.append({"code": pos["code"], "side": "SELL", "reason": sreason})
+            continue
+        px = _sell_price(price_kind, row, sell_p)
+        t = execute_sell(pos, px, trade_date, ts=trade_date + "T14:55:00", reason=reason)
+        if t:
+            sells.append(t)
+            if "止损" in reason:
+                daily_stops += 1
 
-    # ---- 再处理买入 ----
-    held_codes = {p["code"] for p in db.get_positions()}
-    if sentiment["tradable"] and daily_stops < st.MAX_STOPS_PER_DAY:
-        for w in dfetch.WATCHLIST:
-            if len(db.get_positions()) >= st.MAX_POSITIONS:
-                break
-            if w["code"] in held_codes:
-                continue
-            bar = _bar_for(bars, w["code"], trade_date, w)
-            if bar is None:
-                continue
-            ok, reason = st.is_buy_candidate(bar, index_open_pct, sentiment["tradable"])
-            if ok:
-                # 模拟以接近开盘封板价买入（用开盘价上浮，封板很难买到，取 open 与 close 间）
-                buy_price = round((bar["open"] + bar["close"]) / 2, 3)
-                t = execute_buy(w["code"], w["name"], w["theme"], buy_price, trade_date, reason=reason)
+    # 3) 买入执行：用 prev(=信号日 T) 的候选池，在 D 开盘价买入
+    prev = _prev_date(dates, trade_date)
+    if prev and sentiment["tradable"] and daily_stops < st.MAX_STOPS_PER_DAY:
+        # 大盘低开过多则不开新仓
+        if index_open_pct is not None and index_open_pct < st.INDEX_LOW_OPEN_LIMIT * 100:
+            if log:
+                db.log_scan("买入暂停", f"{trade_date} 大盘低开{index_open_pct:.2f}%超过-1%，今日不开新仓", trade_date=trade_date)
+        else:
+            cands = db.get_candidates(prev)
+            held = {p["code"] for p in db.get_positions()}
+            for c in cands:
+                if len(db.get_positions()) >= st.MAX_POSITIONS:
+                    break
+                code = c["code"]
+                if code in held:
+                    continue
+                row = _row_at(panel, code, trade_date)
+                if row is None:
+                    continue
+                can, breason = st.can_buy_at_open(row)
+                if not can:
+                    db.record_rejected({"signal_date": prev, "attempt_date": trade_date,
+                                        "code": code, "name": c.get("name"), "side": "BUY",
+                                        "reason": breason})
+                    rejected.append({"code": code, "side": "BUY", "reason": breason})
+                    continue
+                theme = theme_map.get(code, "题材")
+                t = execute_buy(code, c.get("name"), theme, row["open"], prev, trade_date,
+                                reason=f"{c.get('reason','')}→{breason}")
                 if t:
                     buys.append(t)
-                    held_codes.add(w["code"])
+                    held.add(code)
 
+    # 4) 选股：用 D 收盘生成新候选池（signal_date=D），供下一交易日执行
+    cands_today = st.select_candidates(panel, names, trade_date, sentiment["tradable"])
+    db.save_candidates(trade_date, cands_today)
+
+    # 5) 净值
     update_equity(trade_date)
-    if intraday_log:
-        db.log_scan("收盘结算", f"{trade_date} 卖出{len(sells)}笔 买入{len(buys)}笔 情绪[{sentiment['regime']}]",
-                    signals={"sells": sells, "buys": buys}, trade_date=trade_date)
-    return {"sentiment": sentiment, "sells": sells, "buys": buys}
+
+    if log:
+        db.log_scan("收盘处理",
+                    f"{trade_date} 情绪[{sentiment['regime']}]涨停{sentiment['limit_up_count']} "
+                    f"买{len(buys)}卖{len(sells)}拒{len(rejected)} 新候选{len(cands_today)}",
+                    signals={"buys": [b["code"] for b in buys], "sells": [s["code"] for s in sells],
+                             "rejected": rejected}, trade_date=trade_date)
+    return {"sentiment": sentiment, "buys": buys, "sells": sells,
+            "rejected": rejected, "candidates": cands_today}

@@ -205,15 +205,18 @@ def _spot_index(spot_df):
     return out
 
 
-def process_intraday(spot_df, panel, names, trade_date, theme_map=None, log=True):
+def process_intraday(spot_df, panel, names, trade_date, theme_map=None, industry_map=None, log=True):
     """盘中实时撮合：用实时快照执行卖出（T+1）与买入，实时价成交。
-    顺序：实时情绪 -> 卖出 -> 买入 -> 更新净值。收盘后 settle_close 再用日线对账。"""
+    顺序：实时情绪 -> 卖出 -> 买入 -> 更新净值。收盘后 settle_close 再用日线对账。
+    industry_map: {代码: 证监会行业}，用于题材板块联动加分。"""
     theme_map = theme_map or {}
     spot = _spot_index(spot_df)
 
     # 1) 实时情绪
     up, dn, amt_yi = st.count_limit_updown_spot(spot_df)
     regime, tradable = st.classify_sentiment(up)
+    # 题材板块联动：各行业当日实时涨停家数
+    sector_counts = st.count_sector_limitups_spot(spot_df, industry_map) if industry_map else {}
     sentiment = {
         "trade_date": trade_date, "limit_up_count": up, "limit_down_count": dn,
         "total_amount": amt_yi, "index_pct": None, "index_open_pct": None,
@@ -257,7 +260,8 @@ def process_intraday(spot_df, panel, names, trade_date, theme_map=None, log=True
     # 3) 买入（实时价；情绪不可交易/止损过多则不开新仓）
     cands = []
     if tradable and daily_stops < st.MAX_STOPS_PER_DAY:
-        cands = st.select_intraday_candidates(spot_df, panel, tradable)
+        cands = st.select_intraday_candidates(spot_df, panel, tradable,
+                                              industry_map=industry_map, sector_counts=sector_counts)
         held = {p["code"] for p in db.get_positions()}
         for c in cands:
             if len(db.get_positions()) >= st.MAX_POSITIONS:
@@ -276,7 +280,7 @@ def process_intraday(spot_df, panel, names, trade_date, theme_map=None, log=True
                                     "reason": breason})
                 rejected.append({"code": code, "side": "BUY", "reason": breason})
                 continue
-            theme = theme_map.get(code, "题材")
+            theme = theme_map.get(code) or c.get("sector") or "题材"
             ts = trade_date + "T" + _now_hm()
             t = execute_buy(bs_code, c.get("name"), theme, row["price"], trade_date, trade_date,
                             reason=f"{c.get('reason','')}→{breason}")

@@ -44,6 +44,14 @@ TOP_N_CANDIDATES = 20        # 候选池规模
 # 流动性过滤（baostock 日线 amount 字段，单位：元）
 MIN_AMOUNT = 1e8             # 日成交额 > 1亿
 
+# 流通市值过滤（单位：元）——只做 5亿~100亿 的中小盘，过滤超大盘与壳股
+MIN_FLOAT_MV = 5e8           # 5亿，过滤微盘/壳股
+MAX_FLOAT_MV = 1e10          # 100亿，过滤超大盘（盘子太大难涨停）
+
+# 题材板块联动加分（同一证监会行业当日实时涨停家数）
+SECTOR_LINK_MIN = 3          # 联动>=3只视为板块发酵
+SECTOR_SCORE_W = 8           # 每只联动涨停的评分权重（封顶 10 只）
+
 # ----------------------------- 卖出/风控阈值 -----------------------------
 STOP_LOSS = -0.05            # 跌破买入价 -5% 止损（按收盘判定，收盘价执行）
 STOP_OVERNIGHT_GAP = -0.03   # 次日低开 < -3% 开盘清仓（开盘价执行）
@@ -215,10 +223,11 @@ def _prior_boards(df, limit, before_date=None):
     return n
 
 
-def evaluate_intraday_candidate(spot_row, hist_df, today=None):
+def evaluate_intraday_candidate(spot_row, hist_df, today=None, industry_map=None, sector_counts=None):
     """盘中实时评估单只票是否为买入候选。
-    spot_row: 实时快照行(dict)，含 code,name,price,pct,turn,amount,vol_ratio,limit_up,preclose。
+    spot_row: 实时快照行(dict)，含 code,name,price,pct,turn,amount,vol_ratio,limit_up,preclose,float_mv。
     hist_df: 该票历史日线(升序，全部早于今日)，用于连板高度。
+    industry_map/sector_counts: 板块联动（同行业当日实时涨停家数）映射与计数。
     返回 dict(score,reason,...) 或 None。"""
     code = spot_row.get("code")
     if not code:
@@ -242,7 +251,11 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None):
     turn = spot_row.get("turn") or 0
     if turn < TURN_MIN or turn > TURN_MAX:
         return None
-    # 3) 连板高度（历史，剔除过高）
+    # 3) 流通市值过滤：只做 5亿~100亿 中小盘（float_mv 缺失则放行，不误杀）
+    fmv = spot_row.get("float_mv")
+    if fmv and fmv > 0 and not (MIN_FLOAT_MV <= fmv <= MAX_FLOAT_MV):
+        return None
+    # 4) 连板高度（历史，剔除过高）
     boards = _prior_boards(hist_df, limit) if hist_df is not None else 0
     # 今日这一板尚未计入历史，实际"当前板高" = 历史连板 + (今日是否已涨停)
     cur_board = boards + 1
@@ -255,6 +268,14 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None):
     if vr:
         score += min(vr, 5) * 10
     score += min(turn, 20)
+    # 5) 题材板块联动加分：同行业涨停越多，板块越活跃、持续性越强
+    sector = None
+    sector_link = 0
+    if industry_map is not None:
+        sector = industry_map.get(code) or industry_map.get(dfetch.to_bs_code(code))
+        if sector and sector_counts:
+            sector_link = sector_counts.get(sector, 0)
+            score += min(sector_link, 10) * SECTOR_SCORE_W
     limit_up_px = spot_row.get("limit_up") or (preclose * (1 + limit))
     sealed = limit_up_px > 0 and (limit_up_px - price) / limit_up_px <= SEALED_TOL
     return {
@@ -262,23 +283,28 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None):
         "vol_ratio": round(vr, 2) if vr else None, "turn": round(turn, 2),
         "amount": round(amount, 0), "pctChg": round(spot_row.get("pct") or 0, 2),
         "price": price, "limit_up": limit_up_px, "sealed": sealed,
+        "float_mv": round(fmv, 0) if fmv else None,
+        "sector": sector or "", "sector_link": sector_link,
         "score": round(score, 2),
         "reason": f"盘中{cur_board}板冲涨停(实时{pct*100:.1f}%)"
                   + (f" 量比{vr:.1f}" if vr else "")
-                  + f" 换手{turn:.1f}%",
+                  + f" 换手{turn:.1f}%"
+                  + (f" 板块联动{sector_link}板" if sector_link >= SECTOR_LINK_MIN else ""),
     }
 
 
-def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_CANDIDATES):
+def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_CANDIDATES,
+                               industry_map=None, sector_counts=None):
     """对实时快照全股票池筛选盘中买入候选，按 score 降序取 top_n。
-    spot_df: ak_spot 结果；panel: {code: 历史df(升序)}。返回 list[dict]。"""
+    spot_df: ak_spot 结果；panel: {code: 历史df(升序)}。
+    industry_map/sector_counts: 板块联动映射与各行业实时涨停计数。返回 list[dict]。"""
     if not sentiment_tradable or spot_df is None or spot_df.empty:
         return []
     cands = []
     for _, sr in spot_df.iterrows():
         row = sr.to_dict()
         hist = panel.get(row.get("code")) or panel.get(dfetch.to_bs_code(row.get("code", "")))
-        c = evaluate_intraday_candidate(row, hist)
+        c = evaluate_intraday_candidate(row, hist, industry_map=industry_map, sector_counts=sector_counts)
         if c:
             cands.append(c)
     cands.sort(key=lambda x: x["score"], reverse=True)
@@ -305,6 +331,25 @@ def count_limit_updown_spot(spot_df):
             dn += 1
     total_amount_yi = round(total_amount / 1e8, 1) if total_amount else None
     return up, dn, total_amount_yi
+
+
+def count_sector_limitups_spot(spot_df, industry_map):
+    """统计每个证监会行业当日实时涨停家数（题材板块联动数）。
+    industry_map: {六位或bs代码: 行业名}。返回 {行业名: 涨停家数}。"""
+    counts = {}
+    if spot_df is None or spot_df.empty or not industry_map:
+        return counts
+    for _, sr in spot_df.iterrows():
+        code = str(sr.get("code") or "")
+        price = sr.get("price") or 0
+        lu = sr.get("limit_up")
+        if price <= 0 or not lu or lu <= 0:
+            continue
+        if (lu - price) / lu <= SEALED_TOL:   # 封死涨停
+            ind = industry_map.get(code) or industry_map.get(dfetch.to_bs_code(code))
+            if ind:
+                counts[ind] = counts.get(ind, 0) + 1
+    return counts
 
 
 def can_buy_spot(spot_row):

@@ -142,6 +142,20 @@ def get_all_basics():
     return df
 
 
+def get_stock_industry():
+    """全市场证监会行业分类。返回 {baostock代码: 行业名}。
+    用于题材板块联动统计（同板块当日涨停家数）。"""
+    rs = bs.query_stock_industry()
+    out = {}
+    while (rs.error_code == "0") and rs.next():
+        r = rs.get_row_data()
+        # 字段: updateDate, code, code_name, industry, industryClassification
+        code, ind = r[1], (r[3] or "").strip()
+        if code and ind:
+            out[code] = ind
+    return out
+
+
 def _bs_index_codes(fn):
     """调用 baostock 指数成分函数，返回 baostock 代码集合(sh./sz.)。"""
     rs = getattr(bs, fn)()
@@ -228,9 +242,13 @@ def _panel_init(conn):
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS basics (
-            code TEXT PRIMARY KEY, name TEXT, ipoDate TEXT
+            code TEXT PRIMARY KEY, name TEXT, ipoDate TEXT, industry TEXT
         )
     """)
+    # 旧库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加列）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(basics)").fetchall()}
+    if "industry" not in cols:
+        conn.execute("ALTER TABLE basics ADD COLUMN industry TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fetch_meta (
             code TEXT, start TEXT, end TEXT, fetched_at TEXT,
@@ -256,10 +274,15 @@ def build_panel(start, end, lookback_days=40, path=PANEL_DB, progress_every=200)
         if idx_codes:
             uni = [u for u in uni if u["code"] in idx_codes]
             print(f"[panel] 沪深300+中证500+中证1000 共{len(idx_codes)}只 -> 可交易{len(uni)}只")
-        # 存基础信息
+        # 存基础信息（含证监会行业分类，用于板块联动统计）
+        try:
+            ind_map = get_stock_industry()
+        except Exception as e:
+            print(f"[panel] industry ERR {repr(e)[:80]}")
+            ind_map = {}
         conn.executemany(
-            "INSERT OR REPLACE INTO basics(code,name,ipoDate) VALUES(?,?,?)",
-            [(u["code"], u["name"], u["ipoDate"]) for u in uni],
+            "INSERT OR REPLACE INTO basics(code,name,ipoDate,industry) VALUES(?,?,?,?)",
+            [(u["code"], u["name"], u["ipoDate"], ind_map.get(u["code"], "")) for u in uni],
         )
         conn.commit()
         done = {r[0] for r in conn.execute(
@@ -310,6 +333,21 @@ def load_panel(path=PANEL_DB):
     bmap = {c: g.reset_index(drop=True) for c, g in bars.groupby("code")}
     nmap = {r["code"]: r["name"] for _, r in basics.iterrows()}
     return bmap, nmap
+
+
+def load_industry(path=PANEL_DB):
+    """读出 {baostock代码: 行业名} 与 {六位代码: 行业名}（板块联动统计用）。"""
+    try:
+        conn = _panel_conn(path)
+        rows = conn.execute("SELECT code, industry FROM basics WHERE industry IS NOT NULL AND industry!=''").fetchall()
+        conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for code, ind in rows:
+        out[code] = ind
+        out[code.split(".")[-1]] = ind   # 六位代码也可查
+    return out
 
 
 def panel_dates(path=PANEL_DB):
@@ -545,9 +583,29 @@ def ak_spot(codes=None, prefer="tencent"):
     return pd.DataFrame(), "none"
 
 
+def backfill_industry(path=PANEL_DB):
+    """给已有 panel.db 的 basics 表补全证监会行业分类（不重建日线）。"""
+    conn = _panel_conn(path)
+    _panel_init(conn)
+    with bs_session():
+        ind_map = get_stock_industry()
+    codes = [r[0] for r in conn.execute("SELECT code FROM basics").fetchall()]
+    n = 0
+    for code in codes:
+        ind = ind_map.get(code, "")
+        if ind:
+            conn.execute("UPDATE basics SET industry=? WHERE code=?", (ind, code))
+            n += 1
+    conn.commit()
+    conn.close()
+    print(f"[backfill_industry] {n}/{len(codes)} 行业已写入")
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) >= 2 and sys.argv[1] == "panel":
+    if len(sys.argv) >= 2 and sys.argv[1] == "industry":
+        backfill_industry()
+    elif len(sys.argv) >= 2 and sys.argv[1] == "panel":
         s = sys.argv[2] if len(sys.argv) > 2 else "2025-07-01"
         e = sys.argv[3] if len(sys.argv) > 3 else "2025-08-31"
         build_panel(s, e)

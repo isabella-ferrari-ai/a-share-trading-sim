@@ -52,6 +52,14 @@ def _today():
 
 
 _panel_cache = {"date": None, "panel": None, "names": None}
+_industry_cache = {"map": None}
+
+
+def _load_industry_cached():
+    """行业分类映射缓存（题材板块联动用，盘中不变）。"""
+    if _industry_cache["map"] is None:
+        _industry_cache["map"] = dfetch.load_industry()
+    return _industry_cache["map"]
 
 
 def _panel_is_fresh(td, max_age_days=5):
@@ -107,7 +115,8 @@ def scan_intraday(td):
     if spot_df is None or spot_df.empty:
         db.log_scan("实时行情失败", f"{td} 实时快照为空(源{src})，本次跳过", trade_date=td)
         return
-    res = engine.process_intraday(spot_df, panel, names, td, log=False)
+    industry_map = _load_industry_cached()
+    res = engine.process_intraday(spot_df, panel, names, td, industry_map=industry_map, log=False)
     s = res["sentiment"]
     db.log_scan("盘中扫描",
                 f"{td} [实时源:{src}] 情绪[{s['regime']}]涨停{s['limit_up_count']}/跌停{s['limit_down_count']} "
@@ -161,6 +170,7 @@ def scan_once():
                 return
             _ensure_recent_panel(td)
             _panel_cache.update({"date": None})  # 强制重载最新面板
+            _industry_cache["map"] = None        # 行业映射随面板刷新
         scan_intraday(td)
         return
 

@@ -52,14 +52,14 @@ def _today():
 
 
 _panel_cache = {"date": None, "panel": None, "names": None}
-_industry_cache = {"map": None}
+_concept_cache = {"map": None}
 
 
-def _load_industry_cached():
-    """行业分类映射缓存（题材板块联动用，盘中不变）。"""
-    if _industry_cache["map"] is None:
-        _industry_cache["map"] = dfetch.load_industry()
-    return _industry_cache["map"]
+def _load_concept_cached():
+    """概念板块映射缓存（题材联动用，盘中不变；每日收盘后刷新到 concept_map 表）。"""
+    if _concept_cache["map"] is None:
+        _concept_cache["map"] = dfetch.load_concept_map()
+    return _concept_cache["map"]
 
 
 def _panel_is_fresh(td, max_age_days=5):
@@ -115,8 +115,8 @@ def scan_intraday(td):
     if spot_df is None or spot_df.empty:
         db.log_scan("实时行情失败", f"{td} 实时快照为空(源{src})，本次跳过", trade_date=td)
         return
-    industry_map = _load_industry_cached()
-    res = engine.process_intraday(spot_df, panel, names, td, industry_map=industry_map, log=False)
+    concept_map = _load_concept_cached()
+    res = engine.process_intraday(spot_df, panel, names, td, concept_map=concept_map, log=False)
     s = res["sentiment"]
     db.log_scan("盘中扫描",
                 f"{td} [实时源:{src}] 情绪[{s['regime']}]涨停{s['limit_up_count']}/跌停{s['limit_down_count']} "
@@ -147,13 +147,23 @@ def settle_close(td):
         dates = [d for d in dfetch.get_trade_dates(SIM_START, td) if d in set(dfetch.panel_dates())]
     if td not in dates:
         return
-    res = engine.process_day(panel, names, index_df, dates, td, log=False)
+    # 只对账/统计/选股/净值，不再执行交易（盘中已实时成交，避免重复买卖）
+    res = engine.settle_eod(panel, names, index_df, dates, td, log=False)
     s = res["sentiment"]
     db.log_scan("收盘结算",
                 f"{td} 日线对账 情绪[{s['regime']}]涨停{s['limit_up_count']} "
                 f"今日累计买{len([t for t in db.get_trades(999) if t['side']=='BUY' and t['execute_date']==td])} "
-                f"明日候选{len(res['candidates'])}",
+                f"明日候选{len(res['candidates'])}（无交易，盘中已成交）",
                 trade_date=td)
+    # 收盘后刷新概念板块映射缓存（每天一次；被墙则保留旧缓存不影响主流程）
+    if dfetch.concept_map_date() != td:
+        try:
+            uni = {dfetch.to_bs_code(c) for c in dfetch.universe_codes()}
+            n = dfetch.refresh_concept_map(td, only_codes=uni or None)
+            _concept_cache["map"] = None  # 失效，下次盘中重载
+            db.log_scan("概念刷新", f"{td} 概念板块映射已更新 {n} 只", trade_date=td)
+        except Exception as e:
+            db.log_scan("概念刷新异常", f"{repr(e)[:120]}", trade_date=td)
 
 
 def scan_once():
@@ -170,7 +180,7 @@ def scan_once():
                 return
             _ensure_recent_panel(td)
             _panel_cache.update({"date": None})  # 强制重载最新面板
-            _industry_cache["map"] = None        # 行业映射随面板刷新
+            _concept_cache["map"] = None         # 概念映射随面板刷新
         scan_intraday(td)
         return
 

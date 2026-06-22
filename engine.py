@@ -205,18 +205,18 @@ def _spot_index(spot_df):
     return out
 
 
-def process_intraday(spot_df, panel, names, trade_date, theme_map=None, industry_map=None, log=True):
+def process_intraday(spot_df, panel, names, trade_date, theme_map=None, concept_map=None, log=True):
     """盘中实时撮合：用实时快照执行卖出（T+1）与买入，实时价成交。
     顺序：实时情绪 -> 卖出 -> 买入 -> 更新净值。收盘后 settle_close 再用日线对账。
-    industry_map: {代码: 证监会行业}，用于题材板块联动加分。"""
+    concept_map: {代码: [概念,...]}，用于题材概念板块联动加分。"""
     theme_map = theme_map or {}
     spot = _spot_index(spot_df)
 
     # 1) 实时情绪
     up, dn, amt_yi = st.count_limit_updown_spot(spot_df)
     regime, tradable = st.classify_sentiment(up)
-    # 题材板块联动：各行业当日实时涨停家数
-    sector_counts = st.count_sector_limitups_spot(spot_df, industry_map) if industry_map else {}
+    # 题材概念板块联动：各概念当日实时涨停家数
+    concept_counts = st.count_concept_limitups_spot(spot_df, concept_map) if concept_map else {}
     sentiment = {
         "trade_date": trade_date, "limit_up_count": up, "limit_down_count": dn,
         "total_amount": amt_yi, "index_pct": None, "index_open_pct": None,
@@ -261,7 +261,7 @@ def process_intraday(spot_df, panel, names, trade_date, theme_map=None, industry
     cands = []
     if tradable and daily_stops < st.MAX_STOPS_PER_DAY:
         cands = st.select_intraday_candidates(spot_df, panel, tradable,
-                                              industry_map=industry_map, sector_counts=sector_counts)
+                                              concept_map=concept_map, concept_counts=concept_counts)
         held = {p["code"] for p in db.get_positions()}
         for c in cands:
             if len(db.get_positions()) >= st.MAX_POSITIONS:
@@ -388,3 +388,42 @@ def process_day(panel, names, index_df, dates, trade_date, theme_map=None, log=T
                              "rejected": rejected}, trade_date=trade_date)
     return {"sentiment": sentiment, "buys": buys, "sells": sells,
             "rejected": rejected, "candidates": cands_today}
+
+
+def settle_eod(panel, names, index_df, dates, trade_date, log=True):
+    """收盘后日线对账结算——只做对账/统计，绝不再执行交易。
+
+    盘中 process_intraday 已完成全部实时买卖，本函数仅用完整日线：
+    1. 重新计算真实情绪（涨停/跌停家数、成交额）并落库；
+    2. 用日线收盘价校正持仓 last_price / high_since_open / started；
+    3. 用收盘日线生成次日候选池（signal_date=trade_date）；
+    4. 重算净值。
+    不执行买入、不执行卖出（避免与盘中重复成交）。
+    """
+    # 1) 真实情绪（覆盖盘中近似值）
+    sentiment, _ = compute_sentiment(panel, index_df, trade_date)
+    db.upsert_sentiment(sentiment)
+
+    # 2) 用日线收盘价校正持仓状态（不卖出）
+    for pos in db.get_positions():
+        row = _row_at(panel, pos["code"], trade_date)
+        if row is None:
+            continue
+        high_since = max(pos.get("high_since_open") or pos["avg_cost"], row["high"])
+        started = 1 if (high_since / pos["avg_cost"] - 1) >= st.STARTED_GAIN else pos.get("started", 0)
+        db.update_position_price(pos["code"], row["close"], high_since, started)
+
+    # 3) 用收盘日线生成次日候选池
+    cands_today = st.select_candidates(panel, names, trade_date, sentiment["tradable"])
+    db.save_candidates(trade_date, cands_today)
+
+    # 4) 净值
+    update_equity(trade_date)
+
+    if log:
+        db.log_scan("收盘结算",
+                    f"{trade_date} 日线对账 情绪[{sentiment['regime']}]涨停{sentiment['limit_up_count']}/"
+                    f"跌停{sentiment['limit_down_count']} 持仓{len(db.get_positions())} "
+                    f"明日候选{len(cands_today)}（无交易，盘中已成交）",
+                    trade_date=trade_date)
+    return {"sentiment": sentiment, "candidates": cands_today}

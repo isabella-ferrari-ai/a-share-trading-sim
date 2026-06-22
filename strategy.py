@@ -48,9 +48,17 @@ MIN_AMOUNT = 1e8             # 日成交额 > 1亿
 MIN_FLOAT_MV = 5e8           # 5亿，过滤微盘/壳股
 MAX_FLOAT_MV = 1e10          # 100亿，过滤超大盘（盘子太大难涨停）
 
-# 题材板块联动加分（同一证监会行业当日实时涨停家数）
+# 题材板块联动加分（概念板块当日实时涨停家数；证监会行业无法捕捉跨行业题材）
 SECTOR_LINK_MIN = 3          # 联动>=3只视为板块发酵
 SECTOR_SCORE_W = 8           # 每只联动涨停的评分权重（封顶 10 只）
+# 概念板块中的"持股结构/通用属性"标签——非题材，统计联动时剔除（否则人人联动失真）
+CONCEPT_BLOCKLIST = {
+    "保险重仓", "基金重仓", "社保重仓", "券商重仓", "QFII重仓", "信托重仓",
+    "融资融券", "标准普尔", "MSCI中国", "富时罗素", "深股通", "沪股通",
+    "含H股", "含B股", "AH股", "央企改革", "国企改革", "预盈预增", "预亏预减",
+    "业绩预升", "业绩预降", "高送转", "次新股", "创业板综", "中证500", "沪深300",
+    "上证180", "上证380", "深成500", "证金持股", "汇金概念", "百元股",
+}
 
 # ----------------------------- 卖出/风控阈值 -----------------------------
 STOP_LOSS = -0.05            # 跌破买入价 -5% 止损（按收盘判定，收盘价执行）
@@ -347,11 +355,11 @@ def _prior_boards(df, limit, before_date=None):
     return n
 
 
-def evaluate_intraday_candidate(spot_row, hist_df, today=None, industry_map=None, sector_counts=None):
+def evaluate_intraday_candidate(spot_row, hist_df, today=None, concept_map=None, concept_counts=None):
     """盘中实时评估单只票是否为买入候选。
     spot_row: 实时快照行(dict)，含 code,name,price,pct,turn,amount,vol_ratio,limit_up,preclose,float_mv。
     hist_df: 该票历史日线(升序，全部早于今日)，用于连板高度。
-    industry_map/sector_counts: 板块联动（同行业当日实时涨停家数）映射与计数。
+    concept_map/concept_counts: 概念板块联动（同概念当日实时涨停家数）映射与计数。
     返回 dict(score,reason,...) 或 None。"""
     code = spot_row.get("code")
     if not code:
@@ -392,13 +400,12 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None, industry_map=None
     if vr:
         score += min(vr, 5) * 10
     score += min(turn, 20)
-    # 5) 题材板块联动加分：同行业涨停越多，板块越活跃、持续性越强
-    sector = None
+    # 5) 题材板块联动加分：所属概念中最热概念的涨停家数越多，板块越活跃、持续性越强
+    sector = ""
     sector_link = 0
-    if industry_map is not None:
-        sector = industry_map.get(code) or industry_map.get(dfetch.to_bs_code(code))
-        if sector and sector_counts:
-            sector_link = sector_counts.get(sector, 0)
+    if concept_map is not None and concept_counts:
+        sector, sector_link = best_concept_link(code, concept_map, concept_counts)
+        if sector_link:
             score += min(sector_link, 10) * SECTOR_SCORE_W
     limit_up_px = spot_row.get("limit_up") or (preclose * (1 + limit))
     sealed = limit_up_px > 0 and (limit_up_px - price) / limit_up_px <= SEALED_TOL
@@ -515,10 +522,10 @@ def evaluate_intraday_reversal(spot_row, hist_df):
 
 
 def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_CANDIDATES,
-                               industry_map=None, sector_counts=None):
+                               concept_map=None, concept_counts=None):
     """对实时快照全股票池筛选盘中买入候选（连板涨停+横盘突破+首阴反包），按 score 降序取 top_n。
     spot_df: ak_spot 结果；panel: {code: 历史df(升序)}。
-    industry_map/sector_counts: 板块联动映射与各行业实时涨停计数。返回 list[dict]。
+    concept_map/concept_counts: 概念板块联动映射与各概念实时涨停计数。返回 list[dict]。
     同股多策略命中保留 score 最高者。"""
     if not sentiment_tradable or spot_df is None or spot_df.empty:
         return []
@@ -527,7 +534,7 @@ def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_C
         row = sr.to_dict()
         code = row.get("code")
         hist = panel.get(code) or panel.get(dfetch.to_bs_code(code or ""))
-        for c in (evaluate_intraday_candidate(row, hist, industry_map=industry_map, sector_counts=sector_counts),
+        for c in (evaluate_intraday_candidate(row, hist, concept_map=concept_map, concept_counts=concept_counts),
                   evaluate_intraday_breakout(row, hist),
                   evaluate_intraday_reversal(row, hist)):
             if not c:
@@ -577,6 +584,42 @@ def count_sector_limitups_spot(spot_df, industry_map):
             if ind:
                 counts[ind] = counts.get(ind, 0) + 1
     return counts
+
+
+def count_concept_limitups_spot(spot_df, concept_map):
+    """统计每个概念板块当日实时涨停家数（剔除持股结构类通用标签）。
+    concept_map: {六位或bs代码: [概念,...]}。返回 {概念名: 涨停家数}。"""
+    counts = {}
+    if spot_df is None or spot_df.empty or not concept_map:
+        return counts
+    for _, sr in spot_df.iterrows():
+        code = str(sr.get("code") or "")
+        price = sr.get("price") or 0
+        lu = sr.get("limit_up")
+        if price <= 0 or not lu or lu <= 0:
+            continue
+        if (lu - price) / lu <= SEALED_TOL:   # 封死涨停
+            concepts = concept_map.get(code) or concept_map.get(dfetch.to_bs_code(code)) or []
+            for cpt in concepts:
+                if cpt in CONCEPT_BLOCKLIST:
+                    continue
+                counts[cpt] = counts.get(cpt, 0) + 1
+    return counts
+
+
+def best_concept_link(code, concept_map, concept_counts):
+    """返回该票所属概念中联动涨停家数最多的 (概念名, 家数)；无则 ('', 0)。"""
+    if not concept_map or not concept_counts:
+        return "", 0
+    concepts = concept_map.get(code) or concept_map.get(dfetch.to_bs_code(code)) or []
+    best_name, best_n = "", 0
+    for cpt in concepts:
+        if cpt in CONCEPT_BLOCKLIST:
+            continue
+        n = concept_counts.get(cpt, 0)
+        if n > best_n:
+            best_name, best_n = cpt, n
+    return best_name, best_n
 
 
 def can_buy_spot(spot_row):

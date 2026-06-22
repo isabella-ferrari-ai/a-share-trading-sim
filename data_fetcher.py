@@ -255,6 +255,14 @@ def _panel_init(conn):
             PRIMARY KEY (code, start, end)
         )
     """)
+    # 概念板块映射（东方财富证监会行业无法捕捉跨行业题材，改用概念板块联动）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS concept_map (
+            code TEXT PRIMARY KEY,
+            concepts TEXT,
+            fetched_date TEXT
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bars_date ON bars(date)")
     conn.commit()
 
@@ -355,6 +363,108 @@ def panel_dates(path=PANEL_DB):
     rows = conn.execute("SELECT DISTINCT date FROM bars ORDER BY date").fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+
+# --------------------------------------------------------------------------
+# 概念板块映射（东方财富/同花顺 push 接口在本环境被墙，改用新浪概念板块）
+# --------------------------------------------------------------------------
+_SINA_REF = "https://finance.sina.com.cn"
+_SINA_CLASS = "https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php?param=class"
+_SINA_NODE = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+              "Market_Center.getHQNodeData?page=1&num=1000&sort=symbol&asc=0&node={node}&symbol=&_s_r_a=page")
+
+
+def _sina_get(url, tries=3, timeout=15):
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    last = None
+    for _ in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": _SINA_REF})
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx).read().decode("gbk", "ignore")
+        except Exception as e:
+            last = e
+            time.sleep(0.5)
+    return None
+
+
+def fetch_concept_map(only_codes=None):
+    """抓取 {bs代码: [概念名,...]} 概念板块映射（新浪源）。
+
+    新浪概念板块（gn_*）覆盖跨行业短线题材（机器人/低空经济/算力/华为等），
+    比证监会行业分类更贴合 A 股炒作逻辑。
+    only_codes: 限定输出在该股票池内（bs 代码集合）以减小体积；None 则全量。
+    任何网络异常都安全降级（失败的板块跳过，整体不抛异常）。
+    返回 dict 可能为空（首次/被墙时），调用方退化为不加联动分。"""
+    import re
+    cls = _sina_get(_SINA_CLASS)
+    if not cls:
+        return {}
+    # 解析: "gn_xxx":"gn_xxx,概念名,成分数,..."
+    boards = re.findall(r'"(gn_[A-Za-z0-9]+)":"gn_[A-Za-z0-9]+,([^,]+),', cls)
+    cmap = {}
+    for node, name in boards:
+        js = _sina_get(_SINA_NODE.format(node=node))
+        if not js:
+            continue
+        for sym in re.findall(r'"symbol":"(s[hz]\d{6})"', js):
+            bs_code = sym[:2] + "." + sym[2:]   # shXXXXXX -> sh.XXXXXX
+            if only_codes is not None and bs_code not in only_codes:
+                continue
+            cmap.setdefault(bs_code, []).append(name)
+        time.sleep(0.03)
+    return cmap
+
+
+def refresh_concept_map(fetched_date, only_codes=None, path=PANEL_DB):
+    """抓取并落库概念映射到 concept_map 表（每天收盘后一次）。
+    成功返回写入条数；失败（被墙）返回 0，保留旧缓存不动。"""
+    cmap = fetch_concept_map(only_codes=only_codes)
+    if not cmap:
+        return 0
+    conn = _panel_conn(path)
+    _panel_init(conn)
+    conn.execute("DELETE FROM concept_map")
+    conn.executemany(
+        "INSERT OR REPLACE INTO concept_map(code,concepts,fetched_date) VALUES(?,?,?)",
+        [(code, json.dumps(cs, ensure_ascii=False), fetched_date) for code, cs in cmap.items()],
+    )
+    conn.commit()
+    conn.close()
+    return len(cmap)
+
+
+def load_concept_map(path=PANEL_DB):
+    """读出 {bs代码: [概念,...]} 与 {六位代码: [概念,...]}（板块联动用）。
+    无缓存时返回 {}（调用方退化为不加联动分）。"""
+    try:
+        conn = _panel_conn(path)
+        rows = conn.execute("SELECT code, concepts FROM concept_map").fetchall()
+        conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for code, cs in rows:
+        try:
+            lst = json.loads(cs) if cs else []
+        except Exception:
+            lst = []
+        out[code] = lst
+        out[code.split(".")[-1]] = lst
+    return out
+
+
+def concept_map_date(path=PANEL_DB):
+    """返回 concept_map 缓存日期（最新一行），无则 None。"""
+    try:
+        conn = _panel_conn(path)
+        row = conn.execute("SELECT fetched_date FROM concept_map LIMIT 1").fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -609,6 +719,11 @@ if __name__ == "__main__":
         s = sys.argv[2] if len(sys.argv) > 2 else "2025-07-01"
         e = sys.argv[3] if len(sys.argv) > 3 else "2025-08-31"
         build_panel(s, e)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "concept":
+        from datetime import datetime as _dt
+        uni = {to_bs_code(c) for c in universe_codes()}
+        n = refresh_concept_map(_dt.now().strftime("%Y-%m-%d"), only_codes=uni or None)
+        print(f"[concept] {n} 只股票概念映射已缓存 (date={concept_map_date()})")
     elif len(sys.argv) >= 2 and sys.argv[1] == "spot":
         df, src = ak_spot()
         print("spot source:", src, "rows:", len(df))

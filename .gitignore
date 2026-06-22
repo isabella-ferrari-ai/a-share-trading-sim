@@ -1,0 +1,14 @@
+# Database files (contain user data)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Logs
+logs/*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/

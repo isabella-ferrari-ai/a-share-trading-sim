@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
-"""实时/前向模拟调度器。
+"""前向模拟调度器。
 
-设计原则（与回测同一套 engine.process_day 代码路径）：
-- 选股只用 T 日收盘可见数据；买入在 T+1 开盘价执行；
-- 因此真正的"结算"发生在每个交易日【收盘后】：用当日完整日线跑 process_day。
-  · 卖出用当日行情（严格 T+1、跌停顺延）；
-  · 买入用【昨日】候选池在【今日开盘价】成交（开盘价是已发生的真实价格，非未来数据）；
-  · 再用今日收盘数据生成明日候选池。
+交易模型：T日收盘选股，T+1开盘买入，遵守T+1规则。
+- 选股只用 T 日收盘可见的日线数据；不使用盘中实时数据。
+- 买入在 T+1 日开盘价执行（T+1 开盘价是已发生的真实价格，非未来数据）。
+- 卖出在持仓 T+1 日起判定（买入当日不可卖，严格 T+1）。
+- 真正的"结算"发生在每个交易日收盘后：用当日完整日线跑 process_day。
 
-盘中（09:30-15:00）：每 15 分钟记录一次监控心跳（scan_log），展示节奏；
-  不做任何用日线冒充盘中信号的成交。日线收盘后(约15:30起)才结算。
+盘中（09:30-15:00）：每 15 分钟记录一次监控心跳（scan_log），仅展示状态；
+  不做任何盘中成交。日线收盘后（约 15:05 起）才结算。
 
 数据：
-- 收盘结算：增量刷新本地面板库(panel.db)到今日 -> load_panel -> process_day。
-- 这样 panel.db 随实盘自然增长，无需重复全量抓取。
+- 收盘结算：增量刷新本地面板库（panel.db）到今日 -> load_panel -> process_day。
+- panel.db 随实盘自然增长，无需重复全量抓取。
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -191,8 +190,8 @@ def scan_once():
         cands = db.get_candidates()
         db.log_scan(phase,
                     f"{phase} 监控心跳：持仓{len(positions)}/{st.MAX_POSITIONS}[{held}]；"
-                    f"昨日候选{len(cands)}只待开盘执行；参考情绪[{regime}]。"
-                    f"按T日收盘选股/T+1开盘执行模型，收盘后结算",
+                    f"昨日候选{len(cands)}只，T+1开盘执行；参考情绪[{regime}]。"
+                    f"T日收盘选股/T+1开盘买入模型，收盘后结算",
                     trade_date=td)
         return
 
@@ -206,7 +205,7 @@ def scan_once():
 
 def main():
     db.init_db()
-    db.log_scan("启动", f"调度器启动：实时行情选股，遵守T+1规则，每{SCAN_INTERVAL//60}分钟一次，模拟起始{SIM_START}", trade_date=_today())
+    db.log_scan("启动", f"调度器启动：T日收盘选股/T+1开盘买入，遵守T+1规则，每{SCAN_INTERVAL//60}分钟一次，模拟起始{SIM_START}", trade_date=_today())
     print("scheduler started")
     while True:
         try:

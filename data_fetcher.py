@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """数据获取层。
 
-两类数据源，各司其职：
-1. baostock 日线（免费、稳定、含 isST/tradestatus/turn 字段）：
-   - 用于历史回测，全 A 日线面板缓存到本地 SQLite（data/panel.db），可断点续传。
-2. 东方财富 push2 实时快照（直连，分页+重试；akshare 的 stock_zh_a_spot_em 在本机会被限流）：
-   - 用于 7 月起的前向实时模拟，收盘后抓取全市场快照统计真实涨停数、生成候选池。
+交易模型：T日收盘选股，T+1开盘买入，遵守T+1规则。
+关键原则：买入决策只使用 T 日收盘可见的日线数据；买入成交在 T+1 开盘价执行。
 
-关键原则：任何"当日买入决策"只能使用截至 T 日收盘可见的数据；需要收盘数据的信号一律 T+1 开盘执行。
+数据源：
+1. baostock 日线（免费、稳定、含 isST/tradestatus/turn 字段）：
+   - 日线面板缓存到本地 SQLite（data/panel.db），可断点续传。
+   - 股票池：沪深300 + 中证500 + 中证1000 + 中证2000 成分股并集（约 2800 只）。
+2. 东方财富 push2 实时快照（直连，分页+重试）：
+   - 用于 SIM_START 前收集市场情绪数据（涨停数）。
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -155,8 +157,8 @@ def _bs_index_codes(fn):
 
 
 def index_universe():
-    """沪深300 + 中证500 + 中证1000 成分股并集（baostock 代码）。
-    HS300/ZZ500 用 baostock；CSI1000 用 akshare（000852）。约 1800 只。"""
+    """沪深300 + 中证500 + 中证1000 + 中证2000 成分股并集（baostock 代码）。
+    HS300/ZZ500 用 baostock；CSI1000/CSI2000 用 akshare。约 2800 只。"""
     codes = set()
     # baostock 在 bs_session 内调用
     try:
@@ -167,14 +169,21 @@ def index_universe():
         codes |= _bs_index_codes("query_zz500_stocks")
     except Exception as e:
         print(f"[universe] zz500 ERR {repr(e)[:80]}")
-    # CSI1000 via akshare
+    # CSI1000/CSI2000 via akshare
     try:
         import akshare as ak
-        df = ak.index_stock_cons_csindex(symbol="000852")
-        for c in df["成分券代码"].astype(str):
+        df1000 = ak.index_stock_cons_csindex(symbol="000852")
+        for c in df1000["成分券代码"].astype(str):
             codes.add(to_bs_code(c.zfill(6)))
     except Exception as e:
         print(f"[universe] csi1000 ERR {repr(e)[:80]}")
+    try:
+        import akshare as ak
+        df2000 = ak.index_stock_cons_csindex(symbol="932000")
+        for c in df2000["成分券代码"].astype(str):
+            codes.add(to_bs_code(c.zfill(6)))
+    except Exception as e:
+        print(f"[universe] csi2000 ERR {repr(e)[:80]}")
     return codes
 
 
@@ -240,7 +249,8 @@ def _panel_init(conn):
 
 
 def build_panel(start, end, lookback_days=40, path=PANEL_DB, progress_every=200):
-    """抓取全 A 日线到本地面板库。lookback_days 为信号回溯（连板/均量）所需的前置历史。
+    """抓取指数成分股日线到本地面板库（沪深300+中证500+中证1000+中证2000）。
+    lookback_days 为信号回溯（连板/均量）所需的前置历史。
     断点续传：已抓取过相同 (code,start,end) 的股票跳过。"""
     fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=lookback_days * 2)).strftime("%Y-%m-%d")
     conn = _panel_conn(path)
@@ -248,11 +258,11 @@ def build_panel(start, end, lookback_days=40, path=PANEL_DB, progress_every=200)
     with bs_session():
         basics = get_all_basics()
         uni = tradable_universe(basics, start)
-        # 限定为沪深300 + 中证500 + 中证1000 成分股并集
+        # 限定为沪深300 + 中证500 + 中证1000 + 中证2000 成分股并集
         idx_codes = index_universe()
         if idx_codes:
             uni = [u for u in uni if u["code"] in idx_codes]
-            print(f"[panel] restricted to index constituents: {len(idx_codes)} codes -> {len(uni)} tradable")
+            print(f"[panel] 沪深300+中证500+中证1000+中证2000 共{len(idx_codes)}只 -> 可交易{len(uni)}只")
         # 存基础信息
         conn.executemany(
             "INSERT OR REPLACE INTO basics(code,name,ipoDate) VALUES(?,?,?)",

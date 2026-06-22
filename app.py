@@ -145,7 +145,7 @@ def api_scan_log():
 def api_strategy():
     _select_db()
     return jsonify({
-        "model": "实时行情选股，有机会即交易，遵守T+1规则",
+        "model": "T日收盘选股，T+1开盘买入，遵守T+1规则",
         "initial_capital": db.INITIAL_CAPITAL,
         "max_positions": st.MAX_POSITIONS,
         "max_position_pct": st.MAX_POSITION_PCT,

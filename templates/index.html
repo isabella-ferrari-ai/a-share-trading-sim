@@ -41,7 +41,7 @@ tailwind.config = {
       <h1 class="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
         <span class="text-accent">▲</span> A股短线模拟盘
       </h1>
-      <p class="text-muted text-xs sm:text-sm mt-1">情绪龙头法 + 连板战法 · ¥100万 · <span class="text-accent">T日收盘选股，T+1开盘买入，遵守T+1规则</span></p>
+      <p class="text-muted text-xs sm:text-sm mt-1">情绪龙头法 + 连板战法 · ¥100万 · <span class="text-accent">盘中实时选股，有机会即交易，遵守T+1卖出规则</span></p>
     </div>
     <div class="flex items-center gap-3 text-xs text-muted">
       <span id="regime-badge" class="tag bg-panel2 border border-line">市场: —</span>
@@ -130,8 +130,8 @@ tailwind.config = {
   <!-- Candidate pool -->
   <section class="card p-4 mb-5">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-sm">动态候选池 <span class="text-muted text-xs">规则生成 · 连板高度排序 · 次日开盘执行</span></h2>
-      <span id="cand-date" class="text-xs text-muted">信号日 —</span>
+      <h2 class="font-semibold text-sm">实时候选池 <span class="text-muted text-xs">盘中冲板扫描 · 连板高度排序 · 实时成交</span></h2>
+      <span id="cand-date" class="text-xs text-muted">扫描日 —</span>
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-xs sm:text-sm">
@@ -159,7 +159,7 @@ tailwind.config = {
     <!-- Trades -->
     <section class="card p-4 lg:col-span-2">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-sm">交易明细 <span class="text-muted text-xs">信号日→成交日</span></h2>
+        <h2 class="font-semibold text-sm">交易明细 <span class="text-muted text-xs">实时成交</span></h2>
         <span id="reject-count" class="tag bg-panel2 border border-line text-muted">拒单 0</span>
       </div>
       <div class="overflow-x-auto max-h-96 overflow-y-auto">
@@ -266,7 +266,7 @@ async function loadTrades(){
 
 async function loadCandidates(){
   const d = await j('/api/candidates');
-  document.getElementById('cand-date').textContent='信号日 '+(d.signal_date||'—');
+  document.getElementById('cand-date').textContent='扫描日 '+(d.signal_date||'—');
   const tb=document.getElementById('cand-body');
   const its=d.items||[];
   if(!its.length){tb.innerHTML='<tr><td colspan="8" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr>';return;}

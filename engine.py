@@ -24,6 +24,11 @@ STAMP_TAX = 0.0005      # 卖出印花税万5
 MIN_COMMISSION = 5.0
 
 
+def _now_hm():
+    """当前 HH:MM:SS（盘中成交时间戳用）。"""
+    return datetime.now().strftime("%H:%M:%S")
+
+
 def _buy_cost(amount):
     return max(amount * COMMISSION, MIN_COMMISSION)
 
@@ -187,6 +192,111 @@ def _sell_price(price_kind, row, sell_p):
         # 止盈价须在当日 [low, high] 内方可成交
         return min(max(sell_p, row["low"]), row["high"])
     return sell_p
+
+
+def _spot_index(spot_df):
+    """实时快照 -> {code: row_dict}，code 用六位。"""
+    out = {}
+    if spot_df is None or spot_df.empty:
+        return out
+    for _, sr in spot_df.iterrows():
+        d = sr.to_dict()
+        out[str(d.get("code"))] = d
+    return out
+
+
+def process_intraday(spot_df, panel, names, trade_date, theme_map=None, log=True):
+    """盘中实时撮合：用实时快照执行卖出（T+1）与买入，实时价成交。
+    顺序：实时情绪 -> 卖出 -> 买入 -> 更新净值。收盘后 settle_close 再用日线对账。"""
+    theme_map = theme_map or {}
+    spot = _spot_index(spot_df)
+
+    # 1) 实时情绪
+    up, dn, amt_yi = st.count_limit_updown_spot(spot_df)
+    regime, tradable = st.classify_sentiment(up)
+    sentiment = {
+        "trade_date": trade_date, "limit_up_count": up, "limit_down_count": dn,
+        "total_amount": amt_yi, "index_pct": None, "index_open_pct": None,
+        "regime": regime, "tradable": tradable,
+        "note": f"盘中实时涨停{up}/跌停{dn}(样本{len(spot)}只)",
+    }
+    db.upsert_sentiment(sentiment)
+
+    daily_stops = db.trades_count_on(trade_date, side="SELL", reason_like="止损")
+    sells, buys, rejected = [], [], []
+
+    # 2) 卖出（实时价，严格 T+1，跌停无法卖顺延）
+    for pos in db.get_positions():
+        row = spot.get(pos["code"]) or spot.get(pos["code"].split(".")[-1])
+        if not row:
+            continue
+        price = row.get("price") or 0
+        if price > 0:
+            high_since = max(pos.get("high_since_open") or pos["avg_cost"], price)
+            started = 1 if (high_since / pos["avg_cost"] - 1) >= st.STARTED_GAIN else pos.get("started", 0)
+            db.update_position_price(pos["code"], price, high_since, started)
+            pos["high_since_open"] = high_since
+            pos["started"] = started
+        do_sell, sell_p, reason = st.evaluate_sell_intraday(pos, row, trade_date)
+        if not do_sell:
+            continue
+        can, sreason = st.can_sell_spot(row)
+        if not can:
+            db.record_rejected({"signal_date": pos.get("signal_date"), "attempt_date": trade_date,
+                                "code": pos["code"], "name": pos.get("name"), "side": "SELL",
+                                "reason": f"{reason} 但{sreason}，顺延"})
+            rejected.append({"code": pos["code"], "side": "SELL", "reason": sreason})
+            continue
+        ts = trade_date + "T" + _now_hm()
+        t = execute_sell(pos, sell_p, trade_date, ts=ts, reason=reason)
+        if t:
+            sells.append(t)
+            if "止损" in reason:
+                daily_stops += 1
+
+    # 3) 买入（实时价；情绪不可交易/止损过多则不开新仓）
+    cands = []
+    if tradable and daily_stops < st.MAX_STOPS_PER_DAY:
+        cands = st.select_intraday_candidates(spot_df, panel, tradable)
+        held = {p["code"] for p in db.get_positions()}
+        for c in cands:
+            if len(db.get_positions()) >= st.MAX_POSITIONS:
+                break
+            code = c["code"]
+            bs_code = dfetch.to_bs_code(code)
+            if code in held or bs_code in held:
+                continue
+            row = spot.get(code)
+            if not row:
+                continue
+            can, breason = st.can_buy_spot(row)
+            if not can:
+                db.record_rejected({"signal_date": trade_date, "attempt_date": trade_date,
+                                    "code": bs_code, "name": c.get("name"), "side": "BUY",
+                                    "reason": breason})
+                rejected.append({"code": code, "side": "BUY", "reason": breason})
+                continue
+            theme = theme_map.get(code, "题材")
+            ts = trade_date + "T" + _now_hm()
+            t = execute_buy(bs_code, c.get("name"), theme, row["price"], trade_date, trade_date,
+                            reason=f"{c.get('reason','')}→{breason}")
+            if t:
+                # 实时买入即写入成交时间戳
+                buys.append(t)
+                held.add(bs_code)
+
+    # 4) 候选池落库（盘中实时候选，signal_date=当日）+ 净值
+    db.save_candidates(trade_date, cands)
+    update_equity(trade_date)
+
+    if log:
+        db.log_scan("盘中实时撮合",
+                    f"{trade_date} 情绪[{regime}]涨停{up}/跌停{dn} "
+                    f"买{len(buys)}卖{len(sells)}拒{len(rejected)} 候选{len(cands)}",
+                    signals={"buys": [b["code"] for b in buys], "sells": [s["code"] for s in sells],
+                             "rejected": rejected}, trade_date=trade_date)
+    return {"sentiment": sentiment, "buys": buys, "sells": sells,
+            "rejected": rejected, "candidates": cands}
 
 
 def process_day(panel, names, index_df, dates, trade_date, theme_map=None, log=True):

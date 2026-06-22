@@ -1,20 +1,25 @@
 # -*- coding: utf-8 -*-
-"""策略引擎——T日收盘选股，T+1开盘买入，遵守T+1规则。
+"""策略引擎——盘中实时选股，有机会即交易，遵守 T+1 卖出规则。
 
 核心约束
 ========
-- 选股信号只使用截至 T 日收盘可见的日线数据；
-- 实际买入发生在 T+1 日，成交价为 T+1 日开盘价；
-- 涨停板封板的票若 T+1 一字/涨停开盘则无法买入（标记"涨停无法买入"）；
-- 持仓严格 T+1，买入当日不可卖；跌停开盘的持仓当日无法卖出（标记"跌停无法卖出"，顺延）。
+- 盘中每 15 分钟用实时快照扫描全股票池，发现机会即以实时价成交（实时买/卖）；
+- 实时买入：个股盘中冲向涨停（实时涨幅接近涨停阈值）+ 历史连板高度合适 + 流动性达标；
+  若已封死涨停（实时价≈涨停价）则排队无法成交，标记"涨停无法买入"跳过；
+- 严格 T+1：买入当日不可卖出，次日起方可卖；
+- 跌停封死的持仓当日无法卖出（标记"跌停无法卖出"），顺延到可成交时；
+- 收盘后（settle_close）仍用 baostock 完整日线跑一遍对账/结算。
 
-可用信号因子（均来自日线，无盘中数据）
+收盘选股因子（settle / 回测，来自日线）
 ======================================
-- 涨停收盘：pctChg >= 涨停阈值-缓冲 且 close==high（收在最高即封板）
-- 连板高度：连续涨停天数
-- 放量比：当日成交量 / 过去5日均量
-- 换手率：baostock turn 字段
-- 市场涨停数：全市场当日涨停家数（情绪）
+- 涨停收盘：pctChg >= 涨停阈值-缓冲 且 close≈high（收在最高即封板）
+- 连板高度：连续涨停天数 / 放量比 / 换手率 / 全市场涨停数（情绪）
+
+盘中实时因子
+============
+- 实时涨幅 pct：盘中冲板/封板判定（接近涨停阈值）
+- 历史连板高度：从面板（前一交易日及以前）取连续涨停天数
+- 实时量比 / 换手率 / 成交额：流动性与放量
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -186,7 +191,182 @@ def select_candidates(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_
 
 
 # ==========================================================================
-# 成交可行性（T+1 开盘）
+# 盘中实时选股（每 15 分钟扫描）
+# ==========================================================================
+NEAR_LIMIT_MIN = 0.07        # 实时涨幅至少接近涨停的下限（主板>=7%才视为冲板候选）
+SEALED_TOL = 0.002           # 实时价距涨停价 <=0.2% 视为已封死（排队无法买入）
+
+
+def _prior_boards(df, limit, before_date=None):
+    """用历史面板计算"截至最近一个交易日"的连续涨停天数（不含今日实时）。
+    df 升序，含 code/pctChg/high/close。before_date 给定则只看 < before_date 的行。"""
+    if df is None or df.empty:
+        return 0
+    sub = df if before_date is None else df[df["date"] < before_date]
+    if sub.empty:
+        return 0
+    n = 0
+    for i in range(len(sub) - 1, -1, -1):
+        row = sub.iloc[i]
+        if is_limit_up(row, limit):
+            n += 1
+        else:
+            break
+    return n
+
+
+def evaluate_intraday_candidate(spot_row, hist_df, today=None):
+    """盘中实时评估单只票是否为买入候选。
+    spot_row: 实时快照行(dict)，含 code,name,price,pct,turn,amount,vol_ratio,limit_up,preclose。
+    hist_df: 该票历史日线(升序，全部早于今日)，用于连板高度。
+    返回 dict(score,reason,...) 或 None。"""
+    code = spot_row.get("code")
+    if not code:
+        return None
+    nm = (spot_row.get("name") or "")
+    if "ST" in nm.upper() or "退" in nm:
+        return None
+    price = spot_row.get("price") or 0
+    preclose = spot_row.get("preclose") or 0
+    if price <= 0 or preclose <= 0:
+        return None
+    limit = dfetch.limit_pct(code)
+    pct = (spot_row.get("pct") or 0) / 100.0
+    # 1) 必须正在冲板：实时涨幅接近涨停
+    if pct < max(NEAR_LIMIT_MIN, limit - 0.03):
+        return None
+    # 2) 流动性
+    amount = spot_row.get("amount") or 0
+    if amount < MIN_AMOUNT:
+        return None
+    turn = spot_row.get("turn") or 0
+    if turn < TURN_MIN or turn > TURN_MAX:
+        return None
+    # 3) 连板高度（历史，剔除过高）
+    boards = _prior_boards(hist_df, limit) if hist_df is not None else 0
+    # 今日这一板尚未计入历史，实际"当前板高" = 历史连板 + (今日是否已涨停)
+    cur_board = boards + 1
+    if cur_board > MAX_BOARDS:
+        return None
+    vr = spot_row.get("vol_ratio")
+    if vr is not None and vr < VOL_RATIO_MIN and cur_board < 2:
+        return None
+    score = cur_board * 100
+    if vr:
+        score += min(vr, 5) * 10
+    score += min(turn, 20)
+    limit_up_px = spot_row.get("limit_up") or (preclose * (1 + limit))
+    sealed = limit_up_px > 0 and (limit_up_px - price) / limit_up_px <= SEALED_TOL
+    return {
+        "code": code, "name": nm, "boards": cur_board,
+        "vol_ratio": round(vr, 2) if vr else None, "turn": round(turn, 2),
+        "amount": round(amount, 0), "pctChg": round(spot_row.get("pct") or 0, 2),
+        "price": price, "limit_up": limit_up_px, "sealed": sealed,
+        "score": round(score, 2),
+        "reason": f"盘中{cur_board}板冲涨停(实时{pct*100:.1f}%)"
+                  + (f" 量比{vr:.1f}" if vr else "")
+                  + f" 换手{turn:.1f}%",
+    }
+
+
+def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_CANDIDATES):
+    """对实时快照全股票池筛选盘中买入候选，按 score 降序取 top_n。
+    spot_df: ak_spot 结果；panel: {code: 历史df(升序)}。返回 list[dict]。"""
+    if not sentiment_tradable or spot_df is None or spot_df.empty:
+        return []
+    cands = []
+    for _, sr in spot_df.iterrows():
+        row = sr.to_dict()
+        hist = panel.get(row.get("code")) or panel.get(dfetch.to_bs_code(row.get("code", "")))
+        c = evaluate_intraday_candidate(row, hist)
+        if c:
+            cands.append(c)
+    cands.sort(key=lambda x: x["score"], reverse=True)
+    return cands[:top_n]
+
+
+def count_limit_updown_spot(spot_df):
+    """用实时快照统计全市场涨停/跌停家数。返回 (limit_up, limit_down, total_amount_yi)。"""
+    if spot_df is None or spot_df.empty:
+        return 0, 0, None
+    up = dn = 0
+    total_amount = 0.0
+    for _, sr in spot_df.iterrows():
+        code = str(sr.get("code") or "")
+        price = sr.get("price") or 0
+        if price <= 0:
+            continue
+        lu = sr.get("limit_up")
+        ld = sr.get("limit_down")
+        total_amount += sr.get("amount") or 0
+        if lu and lu > 0 and (lu - price) / lu <= SEALED_TOL:
+            up += 1
+        elif ld and ld > 0 and (price - ld) / ld <= SEALED_TOL:
+            dn += 1
+    total_amount_yi = round(total_amount / 1e8, 1) if total_amount else None
+    return up, dn, total_amount_yi
+
+
+def can_buy_spot(spot_row):
+    """实时能否买入：已封死涨停则排队无法成交。返回 (bool, reason)。"""
+    code = spot_row.get("code")
+    price = spot_row.get("price") or 0
+    preclose = spot_row.get("preclose") or 0
+    if price <= 0:
+        return False, "无实时价"
+    limit = dfetch.limit_pct(code)
+    limit_up_px = spot_row.get("limit_up") or (preclose * (1 + limit) if preclose else 0)
+    if limit_up_px > 0 and (limit_up_px - price) / limit_up_px <= SEALED_TOL:
+        return False, f"涨停无法买入(封板{price})"
+    return True, f"实时买入(现价{price})"
+
+
+def can_sell_spot(spot_row):
+    """实时能否卖出：封死跌停则无法成交。返回 (bool, reason)。"""
+    code = spot_row.get("code")
+    price = spot_row.get("price") or 0
+    preclose = spot_row.get("preclose") or 0
+    if price <= 0:
+        return False, "无实时价"
+    limit = dfetch.limit_pct(code)
+    limit_dn_px = spot_row.get("limit_down") or (preclose * (1 - limit) if preclose else 0)
+    if limit_dn_px > 0 and (price - limit_dn_px) / limit_dn_px <= SEALED_TOL:
+        return False, f"跌停无法卖出(封板{price})"
+    return True, ""
+
+
+def evaluate_sell_intraday(pos, spot_row, current_date):
+    """盘中实时卖出判定（用实时价）。返回 (do_sell, sell_price, reason)。严格 T+1。"""
+    if pos["open_date"] == current_date:
+        return False, None, "T+1当日不可卖"
+    cost = pos["avg_cost"]
+    price = spot_row.get("price") or 0
+    preclose = spot_row.get("preclose") or cost
+    if price <= 0:
+        return False, None, "无实时价"
+    days = _days_held(pos["open_date"], current_date)
+    ret = price / cost - 1
+    # 1) 跌破买价 -5% 止损
+    if ret <= STOP_LOSS:
+        return True, price, f"实时跌破买价{STOP_LOSS*100:.0f}%止损({ret*100:.1f}%)"
+    # 2) 达到目标 +10% 止盈
+    if ret >= TARGET_PROFIT:
+        return True, price, f"实时触及+{TARGET_PROFIT*100:.0f}%止盈({ret*100:.1f}%)"
+    # 3) 持仓未启动且转弱（当日实时跌幅大）
+    pct = (spot_row.get("pct") or 0) / 100.0
+    if days >= 1 and pct <= OPEN_BOARD_DROP and not pos.get("started"):
+        return True, price, f"实时转弱(当日{pct*100:.1f}%)清仓"
+    # 4) 持仓 STALL_DAYS 天未启动止损换股
+    if days >= STALL_DAYS and not pos.get("started"):
+        return True, price, f"持仓{days}天未启动止损换股"
+    # 5) 最长持有到期
+    if days >= HOLD_MAX_DAYS:
+        return True, price, f"持有{days}天到期清仓"
+    return False, None, "继续持有"
+
+
+# ==========================================================================
+# 成交可行性（T+1 开盘）——收盘对账/回测用
 # ==========================================================================
 def can_buy_at_open(next_row):
     """T+1 开盘能否买入：若开盘即涨停（一字/涨停开盘），无法买入。

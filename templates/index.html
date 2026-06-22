@@ -49,12 +49,6 @@ tailwind.config = {
     </div>
   </header>
 
-  <!-- DB toggle -->
-  <div class="flex items-center gap-2 mb-4 bg-panel2 rounded-xl p-1 w-max">
-    <span id="seg-live" class="seg active" onclick="setDB('live')">实时模拟</span>
-    <span id="seg-backtest" class="seg" onclick="setDB('backtest')">历史回测验证</span>
-    <span class="text-[11px] text-muted pl-2 pr-3" id="db-hint">实盘从 2026-07-01 起建仓</span>
-  </div>
 
   <!-- KPI cards -->
   <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
@@ -203,14 +197,6 @@ const eYi = n => n==null?'—':(n/1e8).toFixed(2)+'亿';
 let equityChart, sentChart, DB='live';
 function q(u){return u+(u.includes('?')?'&':'?')+'db='+DB;}
 async function j(u){const r=await fetch(q(u));return r.json();}
-
-function setDB(d){
-  DB=d;
-  document.getElementById('seg-live').classList.toggle('active',d==='live');
-  document.getElementById('seg-backtest').classList.toggle('active',d==='backtest');
-  document.getElementById('db-hint').textContent = d==='live'?'实盘从 2026-07-01 起建仓':'回测期 2025-07-01 ~ 08-31（验证逻辑无未来函数）';
-  refresh();
-}
 
 async function loadOverview(){
   const d = await j('/api/overview');

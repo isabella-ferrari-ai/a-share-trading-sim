@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实时/前向模拟调度器（重构版）——无未来函数。
+"""实时/前向模拟调度器。
 
 设计原则（与回测同一套 engine.process_day 代码路径）：
 - 选股只用 T 日收盘可见数据；买入在 T+1 开盘价执行；
@@ -28,8 +28,8 @@ import engine
 import strategy as st
 
 SCAN_INTERVAL = 15 * 60   # 15分钟
-# 前向模拟起始日：2026-07-01 起开始建仓（之前空仓等待）
-SIM_START = os.environ.get("SIM_START", "2026-07-01")
+# 前向模拟起始日：今天即可建仓
+SIM_START = os.environ.get("SIM_START", "2026-06-22")
 
 
 def _now():
@@ -145,7 +145,7 @@ def _collect_market_data_live(td):
 
 
 def settle_close(td):
-    """收盘后结算：收集市场数据 -> process_day（SIM_START前只收集数据不交易）。"""
+    """收盘后结算：收集市场数据 -> process_day（SIM_START前只收集数据不建仓）。"""
     # 已结算过则跳过
     if db.get_sentiment(td):
         return
@@ -206,7 +206,7 @@ def scan_once():
 
 def main():
     db.init_db()
-    db.log_scan("启动", f"调度器启动(重构版)：T日收盘选股/T+1开盘执行，每{SCAN_INTERVAL//60}分钟一次，模拟起始{SIM_START}", trade_date=_today())
+    db.log_scan("启动", f"调度器启动：实时行情选股，遵守T+1规则，每{SCAN_INTERVAL//60}分钟一次，模拟起始{SIM_START}", trade_date=_today())
     print("scheduler started")
     while True:
         try:

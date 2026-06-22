@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SQLite 持久化层（重构版）。
+"""SQLite 持久化层。
 
 关键变化：
 - trades 增加 signal_date（信号产生日=T）、execute_date（实际成交日=T+1）、status；

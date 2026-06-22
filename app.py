@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Flask Web 服务（重构版）：Dashboard + JSON API。生产用 waitress。
+"""Flask Web 服务：Dashboard + JSON API。生产用 waitress。
 
 支持通过 ?db=backtest 查看回测库，默认实时库 data/trading.db。
 """
@@ -145,7 +145,7 @@ def api_scan_log():
 def api_strategy():
     _select_db()
     return jsonify({
-        "model": "T日收盘选股，T+1日开盘执行（无未来函数）",
+        "model": "实时行情选股，有机会即交易，遵守T+1规则",
         "initial_capital": db.INITIAL_CAPITAL,
         "max_positions": st.MAX_POSITIONS,
         "max_position_pct": st.MAX_POSITION_PCT,

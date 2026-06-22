@@ -175,9 +175,105 @@ def evaluate_candidate(df, idx):
     }
 
 
-def select_candidates(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_CANDIDATES):
-    """对全市场面板在 trade_date(=T日) 选出候选池（按 score 降序，取 top_n）。
-    panel: {code: df(升序)}。返回 list[dict]，每个含 name/theme 等。"""
+# ----------------------------- 策略2：缩量横盘突破 -----------------------------
+RANGE_LOOKBACK = 20          # 横盘区间回看天数
+RANGE_MAX_RATIO = 1.15       # 区间内最高/最低 <= 1.15（波动<15%即横盘）
+SHRINK_RATIO = 0.8           # 前10日均量 < 前20日均量*0.8 视为缩量蓄势
+BREAK_TOL = 0.99             # 收盘 > 区间上沿*0.99 视为突破
+BREAK_VR_MIN = 2.0           # 突破须放量：量比>=2
+
+
+def evaluate_breakout(df, idx):
+    """缩量横盘突破：长期横盘缩量后放量突破区间上沿。
+    df 按日期升序、含 code 列；idx=T日行。返回 dict 或 None。"""
+    if idx < RANGE_LOOKBACK:
+        return None
+    row = df.iloc[idx]
+    code = row["code"]
+    if int(row.get("tradestatus", 1)) != 1 or int(row.get("isST", 0)) == 1:
+        return None
+    amount = row.get("amount") or 0
+    if amount < MIN_AMOUNT:
+        return None
+    turn = row.get("turn") or 0
+    if turn < TURN_MIN or turn > TURN_MAX:
+        return None
+    # 区间（前 RANGE_LOOKBACK 日，不含今日）
+    win = df.iloc[idx - RANGE_LOOKBACK:idx]
+    hi = float(win["high"].max())
+    lo = float(win["low"].min())
+    if lo <= 0 or hi <= 0:
+        return None
+    if hi / lo > RANGE_MAX_RATIO:                 # 波动过大，非横盘
+        return None
+    # 缩量蓄势：前10日均量 < 前20日均量*0.8
+    v10 = float(df["volume"].iloc[idx - 10:idx].mean())
+    v20 = float(win["volume"].mean())
+    if v20 <= 0 or v10 >= v20 * SHRINK_RATIO:
+        return None
+    close = row.get("close") or 0
+    if close <= hi * BREAK_TOL:                    # 未突破区间上沿
+        return None
+    # 突破放量：今日量 >= 前10日均量*2
+    vr = float(row["volume"] / v10) if v10 > 0 else None
+    if vr is None or vr < BREAK_VR_MIN:
+        return None
+    pct = row.get("pctChg") or 0
+    score = 100 + min(vr, 5) * 15 + min(turn, 20) + (pct if pct > 5 else 0)
+    return {
+        "code": code, "strategy_type": "横盘突破",
+        "boards": 0, "vol_ratio": round(vr, 2), "turn": round(turn, 2),
+        "amount": round(amount, 0), "pctChg": round(pct, 2), "close": close,
+        "score": round(score, 2),
+        "reason": f"缩量横盘突破 放量{vr:.1f}x 换手{turn:.1f}%",
+    }
+
+
+# ----------------------------- 策略3：低位首阴反包 -----------------------------
+REVERSAL_GAP = -0.03         # 今日低开 <= -3%
+
+
+def evaluate_reversal(df, idx):
+    """低位首阴反包：昨日涨停封板，今日大幅低开后收红（低开高走反包）。
+    df 按日期升序、含 code 列；idx=T日行。返回 dict 或 None。"""
+    if idx < 1:
+        return None
+    row = df.iloc[idx]
+    prev = df.iloc[idx - 1]
+    code = row["code"]
+    if int(row.get("tradestatus", 1)) != 1 or int(row.get("isST", 0)) == 1:
+        return None
+    limit = dfetch.limit_pct(code)
+    if not is_limit_up(prev, limit):              # 昨日须涨停封板
+        return None
+    o = row.get("open") or 0
+    c = row.get("close") or 0
+    preclose = row.get("preclose") or 0
+    if o <= 0 or c <= 0 or preclose <= 0:
+        return None
+    gap = o / preclose - 1
+    if gap > REVERSAL_GAP:                         # 低开不足 3%
+        return None
+    if c < o:                                      # 必须收红（低开高走）
+        return None
+    amount = row.get("amount") or 0
+    if amount < MIN_AMOUNT:
+        return None
+    close_vs_open = c / o - 1
+    pct = row.get("pctChg") or 0
+    # 低开越深、反包越强 -> 加分；当日涨幅再加分
+    score = 150 + min(abs(gap), 0.10) * 200 + close_vs_open * 100 + (pct if pct > 0 else 0)
+    return {
+        "code": code, "strategy_type": "首阴反包",
+        "boards": 0, "vol_ratio": None, "turn": round(row.get("turn") or 0, 2),
+        "amount": round(amount, 0), "pctChg": round(pct, 2), "close": c,
+        "score": round(score, 2),
+        "reason": f"首阴反包 低开{gap*100:.1f}% 收{close_vs_open*100:.1f}%",
+    }
+
+
+def select_candidates_limitup(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_CANDIDATES):
+    """连板涨停策略：对全市场面板在 trade_date(=T日) 选出候选池。"""
     if not sentiment_tradable:
         return []
     cands = []
@@ -185,7 +281,6 @@ def select_candidates(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_
         nm = names.get(code, code) or ""
         if "ST" in nm.upper():          # isST 字段不可靠，用名称兜底过滤 ST/*ST
             continue
-        # 定位 trade_date 行
         pos = df.index[df["date"] == trade_date]
         if len(pos) == 0:
             continue
@@ -193,8 +288,37 @@ def select_candidates(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_
         c = evaluate_candidate(df, idx)
         if c:
             c["name"] = nm
+            c["strategy_type"] = "连板涨停"
             cands.append(c)
     cands.sort(key=lambda x: x["score"], reverse=True)
+    return cands[:top_n]
+
+
+def select_candidates(panel, names, trade_date, sentiment_tradable, top_n=TOP_N_CANDIDATES):
+    """统一入口：连板涨停 + 缩量横盘突破 + 低位首阴反包 三策略并行，合并按 score 排序。
+    同一股票若被多策略命中，保留 score 最高者。panel: {code: df(升序)}。"""
+    if not sentiment_tradable:
+        return []
+    best = {}   # code -> 最优候选
+    for code, df in panel.items():
+        nm = names.get(code, code) or ""
+        if "ST" in nm.upper():
+            continue
+        pos = df.index[df["date"] == trade_date]
+        if len(pos) == 0:
+            continue
+        idx = int(pos[0])
+        for fn, stype in ((evaluate_candidate, "连板涨停"),
+                          (evaluate_breakout, "横盘突破"),
+                          (evaluate_reversal, "首阴反包")):
+            c = fn(df, idx)
+            if not c:
+                continue
+            c["name"] = nm
+            c.setdefault("strategy_type", stype)
+            if code not in best or c["score"] > best[code]["score"]:
+                best[code] = c
+    cands = sorted(best.values(), key=lambda x: x["score"], reverse=True)
     return cands[:top_n]
 
 
@@ -279,7 +403,7 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None, industry_map=None
     limit_up_px = spot_row.get("limit_up") or (preclose * (1 + limit))
     sealed = limit_up_px > 0 and (limit_up_px - price) / limit_up_px <= SEALED_TOL
     return {
-        "code": code, "name": nm, "boards": cur_board,
+        "code": code, "name": nm, "strategy_type": "连板涨停", "boards": cur_board,
         "vol_ratio": round(vr, 2) if vr else None, "turn": round(turn, 2),
         "amount": round(amount, 0), "pctChg": round(spot_row.get("pct") or 0, 2),
         "price": price, "limit_up": limit_up_px, "sealed": sealed,
@@ -293,21 +417,124 @@ def evaluate_intraday_candidate(spot_row, hist_df, today=None, industry_map=None
     }
 
 
+def _passes_liquidity_mv(spot_row):
+    """盘中通用过滤：非ST/退、流动性、换手、流通市值。通过返回 (price, turn, amount, fmv)，否则 None。"""
+    nm = (spot_row.get("name") or "")
+    if "ST" in nm.upper() or "退" in nm:
+        return None
+    price = spot_row.get("price") or 0
+    preclose = spot_row.get("preclose") or 0
+    if price <= 0 or preclose <= 0:
+        return None
+    amount = spot_row.get("amount") or 0
+    if amount < MIN_AMOUNT:
+        return None
+    turn = spot_row.get("turn") or 0
+    if turn < TURN_MIN or turn > TURN_MAX:
+        return None
+    fmv = spot_row.get("float_mv")
+    if fmv and fmv > 0 and not (MIN_FLOAT_MV <= fmv <= MAX_FLOAT_MV):
+        return None
+    return price, turn, amount, fmv
+
+
+def evaluate_intraday_breakout(spot_row, hist_df):
+    """盘中缩量横盘突破：历史长期横盘缩量，实时价突破前20日高点且放量。
+    hist_df: 该票历史日线(升序，全部早于今日)。返回 dict 或 None。"""
+    if hist_df is None or len(hist_df) < RANGE_LOOKBACK:
+        return None
+    pf = _passes_liquidity_mv(spot_row)
+    if pf is None:
+        return None
+    price, turn, amount, fmv = pf
+    code = spot_row.get("code")
+    nm = spot_row.get("name") or ""
+    win = hist_df.iloc[-RANGE_LOOKBACK:]
+    hi = float(win["high"].max())
+    lo = float(win["low"].min())
+    if lo <= 0 or hi <= 0 or hi / lo > RANGE_MAX_RATIO:
+        return None
+    v10 = float(hist_df["volume"].iloc[-10:].mean())
+    v20 = float(win["volume"].mean())
+    if v20 <= 0 or v10 >= v20 * SHRINK_RATIO:        # 须前期缩量蓄势
+        return None
+    if price <= hi * BREAK_TOL:                       # 实时价未突破区间上沿
+        return None
+    vr = spot_row.get("vol_ratio")
+    if vr is not None and vr < BREAK_VR_MIN:          # 须放量突破
+        return None
+    pct = spot_row.get("pct") or 0
+    score = 100 + (min(vr, 5) * 15 if vr else 0) + min(turn, 20) + (pct if pct > 5 else 0)
+    return {
+        "code": code, "name": nm, "strategy_type": "横盘突破", "boards": 0,
+        "vol_ratio": round(vr, 2) if vr else None, "turn": round(turn, 2),
+        "amount": round(amount, 0), "pctChg": round(pct, 2),
+        "price": price, "limit_up": spot_row.get("limit_up"), "sealed": False,
+        "float_mv": round(fmv, 0) if fmv else None, "sector": "", "sector_link": 0,
+        "score": round(score, 2),
+        "reason": f"盘中横盘突破(破{hi:.2f})" + (f" 量比{vr:.1f}" if vr else "") + f" 换手{turn:.1f}%",
+    }
+
+
+def evaluate_intraday_reversal(spot_row, hist_df):
+    """盘中低位首阴反包：昨日涨停封板，今日大幅低开后实时价已回升过今开（低开高走）。
+    hist_df: 该票历史日线(升序)。返回 dict 或 None。"""
+    if hist_df is None or hist_df.empty:
+        return None
+    pf = _passes_liquidity_mv(spot_row)
+    if pf is None:
+        return None
+    price, turn, amount, fmv = pf
+    code = spot_row.get("code")
+    nm = spot_row.get("name") or ""
+    limit = dfetch.limit_pct(code)
+    prev = hist_df.iloc[-1]                            # 昨日（早于今日）
+    if not is_limit_up(prev, limit):                   # 昨日须涨停封板
+        return None
+    o = spot_row.get("open") or 0
+    preclose = spot_row.get("preclose") or 0
+    if o <= 0 or preclose <= 0:
+        return None
+    gap = o / preclose - 1
+    if gap > REVERSAL_GAP:                             # 低开不足 3%
+        return None
+    if price < o:                                      # 实时价须已回升过今开（低开高走）
+        return None
+    cur_vs_open = price / o - 1
+    pct = spot_row.get("pct") or 0
+    score = 150 + min(abs(gap), 0.10) * 200 + cur_vs_open * 100 + (pct if pct > 0 else 0)
+    return {
+        "code": code, "name": nm, "strategy_type": "首阴反包", "boards": 0,
+        "vol_ratio": round(spot_row.get("vol_ratio"), 2) if spot_row.get("vol_ratio") else None,
+        "turn": round(turn, 2), "amount": round(amount, 0), "pctChg": round(pct, 2),
+        "price": price, "limit_up": spot_row.get("limit_up"), "sealed": False,
+        "float_mv": round(fmv, 0) if fmv else None, "sector": "", "sector_link": 0,
+        "score": round(score, 2),
+        "reason": f"盘中首阴反包 低开{gap*100:.1f}% 现回升{cur_vs_open*100:.1f}%",
+    }
+
+
 def select_intraday_candidates(spot_df, panel, sentiment_tradable, top_n=TOP_N_CANDIDATES,
                                industry_map=None, sector_counts=None):
-    """对实时快照全股票池筛选盘中买入候选，按 score 降序取 top_n。
+    """对实时快照全股票池筛选盘中买入候选（连板涨停+横盘突破+首阴反包），按 score 降序取 top_n。
     spot_df: ak_spot 结果；panel: {code: 历史df(升序)}。
-    industry_map/sector_counts: 板块联动映射与各行业实时涨停计数。返回 list[dict]。"""
+    industry_map/sector_counts: 板块联动映射与各行业实时涨停计数。返回 list[dict]。
+    同股多策略命中保留 score 最高者。"""
     if not sentiment_tradable or spot_df is None or spot_df.empty:
         return []
-    cands = []
+    best = {}
     for _, sr in spot_df.iterrows():
         row = sr.to_dict()
-        hist = panel.get(row.get("code")) or panel.get(dfetch.to_bs_code(row.get("code", "")))
-        c = evaluate_intraday_candidate(row, hist, industry_map=industry_map, sector_counts=sector_counts)
-        if c:
-            cands.append(c)
-    cands.sort(key=lambda x: x["score"], reverse=True)
+        code = row.get("code")
+        hist = panel.get(code) or panel.get(dfetch.to_bs_code(code or ""))
+        for c in (evaluate_intraday_candidate(row, hist, industry_map=industry_map, sector_counts=sector_counts),
+                  evaluate_intraday_breakout(row, hist),
+                  evaluate_intraday_reversal(row, hist)):
+            if not c:
+                continue
+            if code not in best or c["score"] > best[code]["score"]:
+                best[code] = c
+    cands = sorted(best.values(), key=lambda x: x["score"], reverse=True)
     return cands[:top_n]
 
 

@@ -130,19 +130,19 @@ tailwind.config = {
   <!-- Candidate pool -->
   <section class="card p-4 mb-5">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-sm">实时候选池 <span class="text-muted text-xs">盘中冲板扫描 · 连板高度排序 · 实时成交</span></h2>
+      <h2 class="font-semibold text-sm">实时候选池 <span class="text-muted text-xs">盘中扫描 · 连板涨停 / 横盘突破 / 首阴反包 · 评分排序</span></h2>
       <span id="cand-date" class="text-xs text-muted">扫描日 —</span>
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-xs sm:text-sm">
         <thead class="text-muted text-left">
           <tr class="border-b border-line">
-            <th class="py-2 pr-2">#</th><th class="pr-2">股票</th><th class="pr-2">连板</th>
+            <th class="py-2 pr-2">#</th><th class="pr-2">股票</th><th class="pr-2">策略</th><th class="pr-2">连板</th>
             <th class="pr-2">涨幅</th><th class="pr-2">放量比</th><th class="pr-2">换手</th>
             <th class="pr-2">成交额</th><th class="pr-2">评分</th>
           </tr>
         </thead>
-        <tbody id="cand-body"><tr><td colspan="8" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr></tbody>
+        <tbody id="cand-body"><tr><td colspan="9" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -269,11 +269,13 @@ async function loadCandidates(){
   document.getElementById('cand-date').textContent='扫描日 '+(d.signal_date||'—');
   const tb=document.getElementById('cand-body');
   const its=d.items||[];
-  if(!its.length){tb.innerHTML='<tr><td colspan="8" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr>';return;}
+  if(!its.length){tb.innerHTML='<tr><td colspan="9" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr>';return;}
+  const styColor={'连板涨停':'bg-accent/20 text-accent','横盘突破':'bg-sky-500/20 text-sky-400','首阴反包':'bg-amber-500/20 text-amber-400'};
   tb.innerHTML=its.map(c=>`<tr class="border-b border-line/40">
     <td class="py-2 pr-2 text-muted">${c.rank}</td>
     <td class="pr-2 font-medium">${c.name||c.code}<span class="text-[10px] text-muted ml-1">${c.code.replace('.','')}</span></td>
-    <td class="pr-2"><span class="tag bg-accent/20 text-accent">${c.boards}板</span></td>
+    <td class="pr-2"><span class="tag ${styColor[c.strategy_type]||'bg-line/40 text-muted'}">${c.strategy_type||'—'}</span></td>
+    <td class="pr-2">${c.boards>0?`<span class="tag bg-accent/20 text-accent">${c.boards}板</span>`:'<span class="text-muted">—</span>'}</td>
     <td class="pr-2 num text-up">+${c.pct}%</td>
     <td class="pr-2 num">${c.vol_ratio?c.vol_ratio+'x':'—'}</td>
     <td class="pr-2 num">${c.turn}%</td>

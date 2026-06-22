@@ -123,6 +123,7 @@ def init_db():
             rank INTEGER,
             code TEXT NOT NULL,
             name TEXT,
+            strategy_type TEXT,              -- 连板涨停/横盘突破/首阴反包
             boards INTEGER,                  -- 连板高度
             vol_ratio REAL,
             turn REAL,
@@ -133,6 +134,9 @@ def init_db():
             UNIQUE(signal_date, code)
         )
     """)
+    cp_cols = {r[1] for r in c.execute("PRAGMA table_info(candidate_pool)").fetchall()}
+    if "strategy_type" not in cp_cols:
+        c.execute("ALTER TABLE candidate_pool ADD COLUMN strategy_type TEXT")
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -358,11 +362,11 @@ def save_candidates(signal_date, cands):
     for i, c in enumerate(cands):
         conn.execute("""
             INSERT OR REPLACE INTO candidate_pool
-                (signal_date,rank,code,name,boards,vol_ratio,turn,amount,pct,score,reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (signal_date, i + 1, c["code"], c.get("name"), c.get("boards"),
-              c.get("vol_ratio"), c.get("turn"), c.get("amount"), c.get("pctChg"),
-              c.get("score"), c.get("reason")))
+                (signal_date,rank,code,name,strategy_type,boards,vol_ratio,turn,amount,pct,score,reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (signal_date, i + 1, c["code"], c.get("name"), c.get("strategy_type"),
+              c.get("boards"), c.get("vol_ratio"), c.get("turn"), c.get("amount"),
+              c.get("pctChg"), c.get("score"), c.get("reason")))
     conn.commit()
     conn.close()
 

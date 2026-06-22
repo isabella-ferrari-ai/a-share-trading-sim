@@ -280,7 +280,7 @@ def process_intraday(spot_df, panel, names, trade_date, theme_map=None, industry
                                     "reason": breason})
                 rejected.append({"code": code, "side": "BUY", "reason": breason})
                 continue
-            theme = theme_map.get(code) or c.get("sector") or "题材"
+            theme = theme_map.get(code) or c.get("sector") or c.get("strategy_type") or "题材"
             ts = trade_date + "T" + _now_hm()
             t = execute_buy(bs_code, c.get("name"), theme, row["price"], trade_date, trade_date,
                             reason=f"{c.get('reason','')}→{breason}")
@@ -366,7 +366,7 @@ def process_day(panel, names, index_df, dates, trade_date, theme_map=None, log=T
                                         "reason": breason})
                     rejected.append({"code": code, "side": "BUY", "reason": breason})
                     continue
-                theme = theme_map.get(code, "题材")
+                theme = theme_map.get(code) or c.get("strategy_type") or "题材"
                 t = execute_buy(code, c.get("name"), theme, row["open"], prev, trade_date,
                                 reason=f"{c.get('reason','')}→{breason}")
                 if t:

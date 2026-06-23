@@ -30,6 +30,23 @@ tailwind.config = {
   .num{font-variant-numeric:tabular-nums}
   .seg{cursor:pointer;padding:4px 12px;border-radius:8px;font-size:12px}
   .seg.active{background:#fa8c16;color:#0a0e17;font-weight:600}
+  /* 手机端：表格行折叠为带字段名的卡片，避免左右拖动 */
+  @media (max-width:640px){
+    table.rt{display:block;width:100%}
+    table.rt thead{display:none}
+    table.rt tbody{display:block}
+    table.rt tr{display:block;border:1px solid #222c44;border-radius:12px;
+      background:#10151f;padding:8px 11px;margin-bottom:8px}
+    table.rt td{display:flex;justify-content:space-between;align-items:baseline;
+      gap:12px;padding:3px 0!important;border:0;text-align:right}
+    table.rt td::before{content:attr(data-label);color:#8a96ab;font-size:11px;
+      text-align:left;flex:0 0 auto;white-space:nowrap}
+    table.rt td:first-child{border-bottom:1px solid #222c44;
+      margin-bottom:4px;padding-bottom:6px!important;font-weight:600}
+    table.rt td.empty{display:block;text-align:center}
+    table.rt td.empty::before{content:""}
+    .rt-wrap{overflow:visible!important}
+  }
 </style>
 </head>
 <body class="min-h-screen">
@@ -90,15 +107,15 @@ tailwind.config = {
     <!-- Positions -->
     <section class="card p-4">
       <h2 class="font-semibold text-sm mb-3">当前持仓 <span class="text-muted text-xs">严格T+1</span></h2>
-      <div class="overflow-x-auto">
-        <table class="w-full text-xs sm:text-sm">
+      <div class="overflow-x-auto rt-wrap">
+        <table class="w-full text-xs sm:text-sm rt">
           <thead class="text-muted text-left">
             <tr class="border-b border-line">
               <th class="py-2 pr-2">股票</th><th class="pr-2">数量</th><th class="pr-2">成本价</th><th class="pr-2">现价</th>
               <th class="pr-2">市值</th><th class="pr-2">浮盈</th><th class="pr-2">天数</th><th class="pr-2">可卖</th>
             </tr>
           </thead>
-          <tbody id="positions-body"><tr><td colspan="8" class="py-6 text-center text-muted">暂无持仓</td></tr></tbody>
+          <tbody id="positions-body"><tr><td colspan="8" class="empty py-6 text-center text-muted">暂无持仓</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -136,16 +153,16 @@ tailwind.config = {
       <h2 class="font-semibold text-sm">实时候选池 <span class="text-muted text-xs">盘中扫描 · 连板涨停 / 横盘突破 / 首阴反包 · 评分排序</span></h2>
       <span id="cand-date" class="text-xs text-muted">扫描日 —</span>
     </div>
-    <div class="overflow-x-auto">
-      <table class="w-full text-xs sm:text-sm">
+    <div class="overflow-x-auto rt-wrap">
+      <table class="w-full text-xs sm:text-sm rt">
         <thead class="text-muted text-left">
           <tr class="border-b border-line">
-            <th class="py-2 pr-2">#</th><th class="pr-2">股票</th><th class="pr-2">策略</th><th class="pr-2">连板</th>
+            <th class="py-2 pr-2">#股票</th><th class="pr-2">策略</th><th class="pr-2">连板</th>
             <th class="pr-2">涨幅</th><th class="pr-2">放量比</th><th class="pr-2">换手</th>
             <th class="pr-2">成交额</th><th class="pr-2">评分</th>
           </tr>
         </thead>
-        <tbody id="cand-body"><tr><td colspan="9" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr></tbody>
+        <tbody id="cand-body"><tr><td colspan="9" class="empty py-6 text-center text-muted">弱势日空仓，无候选</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -165,12 +182,12 @@ tailwind.config = {
         <h2 class="font-semibold text-sm">交易明细 <span class="text-muted text-xs">实时成交</span></h2>
         <span id="reject-count" class="tag bg-panel2 border border-line text-muted">拒单 0</span>
       </div>
-      <div class="overflow-x-auto max-h-96 overflow-y-auto">
-        <table class="w-full text-xs sm:text-sm">
+      <div class="overflow-x-auto max-h-96 overflow-y-auto rt-wrap">
+        <table class="w-full text-xs sm:text-sm rt">
           <thead class="text-muted text-left sticky top-0 bg-panel">
             <tr class="border-b border-line">
-              <th class="py-2 pr-2">信号日</th><th class="pr-2">成交时间</th><th class="pr-2">方向</th>
-              <th class="pr-2">股票</th><th class="pr-2">数量</th><th class="pr-2">价格</th><th class="pr-2">金额</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
+              <th class="py-2 pr-2">方向/股票</th><th class="pr-2">信号日</th><th class="pr-2">成交时间</th>
+              <th class="pr-2">数量</th><th class="pr-2">价格</th><th class="pr-2">金额</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
             </tr>
           </thead>
           <tbody id="trades-body"></tbody>
@@ -185,17 +202,17 @@ tailwind.config = {
       <h2 class="font-semibold text-sm">清仓清单 <span class="text-muted text-xs">每笔已平仓回合的逐个标的盈亏与胜败</span></h2>
       <div id="closed-summary" class="text-xs text-muted"></div>
     </div>
-    <div class="overflow-x-auto max-h-96 overflow-y-auto">
-      <table class="w-full text-xs sm:text-sm">
+    <div class="overflow-x-auto max-h-96 overflow-y-auto rt-wrap">
+      <table class="w-full text-xs sm:text-sm rt">
         <thead class="text-muted text-left sticky top-0 bg-panel">
           <tr class="border-b border-line">
-            <th class="py-2 pr-2">胜败</th><th class="pr-2">股票</th><th class="pr-2">策略</th>
+            <th class="py-2 pr-2">胜败/股票</th><th class="pr-2">策略</th>
             <th class="pr-2">数量</th><th class="pr-2">卖出价</th><th class="pr-2">卖出额</th>
             <th class="pr-2">盈亏</th><th class="pr-2">收益率</th>
             <th class="pr-2">信号→清仓</th><th class="pr-2">卖出理由</th>
           </tr>
         </thead>
-        <tbody id="closed-body"><tr><td colspan="10" class="py-6 text-center text-muted">暂无清仓记录</td></tr></tbody>
+        <tbody id="closed-body"><tr><td colspan="10" class="empty py-6 text-center text-muted">暂无清仓记录</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -261,16 +278,16 @@ async function loadEquity(){
 async function loadPositions(){
   const data = await j('/api/positions');
   const tb=document.getElementById('positions-body');
-  if(!data.length){tb.innerHTML='<tr><td colspan="8" class="py-6 text-center text-muted">暂无持仓 · 弱势日空仓</td></tr>';return;}
+  if(!data.length){tb.innerHTML='<tr><td colspan="8" class="empty py-6 text-center text-muted">暂无持仓 · 弱势日空仓</td></tr>';return;}
   tb.innerHTML=data.map(p=>`<tr class="border-b border-line/40">
-    <td class="py-2 pr-2"><div class="font-medium">${p.name||p.code}</div><div class="text-[10px] text-muted">${p.theme||''} · 信号${(p.signal_date||'').slice(5)}</div></td>
-    <td class="pr-2 num">${p.shares}</td>
-    <td class="pr-2 num">${fmt(p.avg_cost)}</td>
-    <td class="pr-2 num">${fmt(p.last_price)}</td>
-    <td class="pr-2 num">¥${fmt(p.market_value)}</td>
-    <td class="pr-2 num ${colorCls(p.float_pnl)}">${sign(p.float_pnl_pct)}${p.float_pnl_pct}%<div class="text-[10px]">${sign(p.float_pnl)}${fmt(p.float_pnl)}</div></td>
-    <td class="pr-2 num">${p.days_held}天</td>
-    <td class="pr-2">${p.can_sell?'<span class="text-down">✓</span>':'<span class="text-muted">T+1锁</span>'}</td></tr>`).join('');
+    <td class="py-2 pr-2" data-label="股票"><div><div class="font-medium">${p.name||p.code}</div><div class="text-[10px] text-muted">${p.theme||''} · 信号${(p.signal_date||'').slice(5)}</div></div></td>
+    <td class="pr-2 num" data-label="数量">${p.shares}</td>
+    <td class="pr-2 num" data-label="成本价">${fmt(p.avg_cost)}</td>
+    <td class="pr-2 num" data-label="现价">${fmt(p.last_price)}</td>
+    <td class="pr-2 num" data-label="市值">¥${fmt(p.market_value)}</td>
+    <td class="pr-2 num ${colorCls(p.float_pnl)}" data-label="浮盈">${sign(p.float_pnl_pct)}${p.float_pnl_pct}% (${sign(p.float_pnl)}${fmt(p.float_pnl)})</td>
+    <td class="pr-2 num" data-label="天数">${p.days_held}天</td>
+    <td class="pr-2" data-label="可卖">${p.can_sell?'<span class="text-down">✓</span>':'<span class="text-muted">T+1锁</span>'}</td></tr>`).join('');
 }
 
 async function loadTrades(){
@@ -281,16 +298,15 @@ async function loadTrades(){
     const pnl=t.side==='SELL'?`<span class="num ${colorCls(t.pnl)}">${sign(t.pnl_pct)}${t.pnl_pct}%</span>`:'<span class="text-muted">—</span>';
     const tm=(t.ts||'').replace('T',' ').slice(5);  // MM-DD HH:MM:SS
     return `<tr class="border-b border-line/40">
-      <td class="py-2 pr-2 text-muted whitespace-nowrap">${(t.signal_date||'').slice(5)||'—'}</td>
-      <td class="pr-2 whitespace-nowrap num text-[11px]">${tm||(t.execute_date||t.trade_date||'').slice(5)}</td>
-      <td class="pr-2"><span class="tag ${sideCls}">${t.side==='BUY'?'买入':'卖出'}</span></td>
-      <td class="pr-2 whitespace-nowrap">${t.name||t.code}</td>
-      <td class="pr-2 num">${t.shares}</td>
-      <td class="pr-2 num">${fmt(t.price)}</td>
-      <td class="pr-2 num">¥${fmt(t.amount)}</td>
-      <td class="pr-2">${pnl}</td>
-      <td class="pr-2 text-muted text-[11px]">${t.reason||''}</td></tr>`;
-  }).join('')||'<tr><td colspan="9" class="py-6 text-center text-muted">暂无交易</td></tr>';
+      <td class="py-2 pr-2 whitespace-nowrap" data-label="股票"><span class="tag ${sideCls} mr-1">${t.side==='BUY'?'买入':'卖出'}</span>${t.name||t.code}</td>
+      <td class="pr-2 text-muted whitespace-nowrap" data-label="信号日">${(t.signal_date||'').slice(5)||'—'}</td>
+      <td class="pr-2 whitespace-nowrap num text-[11px]" data-label="成交时间">${tm||(t.execute_date||t.trade_date||'').slice(5)}</td>
+      <td class="pr-2 num" data-label="数量">${t.shares}</td>
+      <td class="pr-2 num" data-label="价格">${fmt(t.price)}</td>
+      <td class="pr-2 num" data-label="金额">¥${fmt(t.amount)}</td>
+      <td class="pr-2" data-label="盈亏">${pnl}</td>
+      <td class="pr-2 text-muted text-[11px]" data-label="理由">${t.reason||''}</td></tr>`;
+  }).join('')||'<tr><td colspan="8" class="empty py-6 text-center text-muted">暂无交易</td></tr>';
 }
 
 async function loadClosed(){
@@ -305,17 +321,16 @@ async function loadClosed(){
   } else { sm.textContent=''; }
   const rs=d.rounds||[];
   tb.innerHTML=rs.map(r=>`<tr class="border-b border-line/40">
-    <td class="py-2 pr-2">${r.win?'<span class="tag bg-up/20 text-up">胜</span>':'<span class="tag bg-down/20 text-down">负</span>'}</td>
-    <td class="pr-2 whitespace-nowrap">${r.name||r.code}</td>
-    <td class="pr-2 text-muted text-[11px]">${r.theme||''}</td>
-    <td class="pr-2 num">${r.shares}</td>
-    <td class="pr-2 num">${fmt(r.sell_price)}</td>
-    <td class="pr-2 num">¥${fmt(r.sell_amount)}</td>
-    <td class="pr-2 num ${colorCls(r.pnl)}">${sign(r.pnl)}¥${fmt(r.pnl)}</td>
-    <td class="pr-2 num ${colorCls(r.pnl_pct)}">${sign(r.pnl_pct)}${r.pnl_pct}%</td>
-    <td class="pr-2 text-muted text-[11px] whitespace-nowrap">${(r.signal_date||'').slice(5)}→${(r.close_date||'').slice(5)}</td>
-    <td class="pr-2 text-muted text-[11px]">${r.reason||''}</td></tr>`).join('')
-    ||'<tr><td colspan="10" class="py-6 text-center text-muted">暂无清仓记录</td></tr>';
+    <td class="py-2 pr-2 whitespace-nowrap" data-label="胜败">${r.win?'<span class="tag bg-up/20 text-up">胜</span>':'<span class="tag bg-down/20 text-down">负</span>'} ${r.name||r.code}</td>
+    <td class="pr-2 text-muted text-[11px]" data-label="策略">${r.theme||''}</td>
+    <td class="pr-2 num" data-label="数量">${r.shares}</td>
+    <td class="pr-2 num" data-label="卖出价">${fmt(r.sell_price)}</td>
+    <td class="pr-2 num" data-label="卖出额">¥${fmt(r.sell_amount)}</td>
+    <td class="pr-2 num ${colorCls(r.pnl)}" data-label="盈亏">${sign(r.pnl)}¥${fmt(r.pnl)}</td>
+    <td class="pr-2 num ${colorCls(r.pnl_pct)}" data-label="收益率">${sign(r.pnl_pct)}${r.pnl_pct}%</td>
+    <td class="pr-2 text-muted text-[11px] whitespace-nowrap" data-label="信号→清仓">${(r.signal_date||'').slice(5)}→${(r.close_date||'').slice(5)}</td>
+    <td class="pr-2 text-muted text-[11px]" data-label="卖出理由">${r.reason||''}</td></tr>`).join('')
+    ||'<tr><td colspan="9" class="empty py-6 text-center text-muted">暂无清仓记录</td></tr>';
 }
 
 async function loadCandidates(){
@@ -323,18 +338,17 @@ async function loadCandidates(){
   document.getElementById('cand-date').textContent='扫描日 '+(d.signal_date||'—');
   const tb=document.getElementById('cand-body');
   const its=d.items||[];
-  if(!its.length){tb.innerHTML='<tr><td colspan="9" class="py-6 text-center text-muted">弱势日空仓，无候选</td></tr>';return;}
+  if(!its.length){tb.innerHTML='<tr><td colspan="9" class="empty py-6 text-center text-muted">弱势日空仓，无候选</td></tr>';return;}
   const styColor={'连板涨停':'bg-accent/20 text-accent','横盘突破':'bg-sky-500/20 text-sky-400','首阴反包':'bg-amber-500/20 text-amber-400'};
   tb.innerHTML=its.map(c=>`<tr class="border-b border-line/40">
-    <td class="py-2 pr-2 text-muted">${c.rank}</td>
-    <td class="pr-2 font-medium">${c.name||c.code}<span class="text-[10px] text-muted ml-1">${c.code.replace('.','')}</span></td>
-    <td class="pr-2"><span class="tag ${styColor[c.strategy_type]||'bg-line/40 text-muted'}">${c.strategy_type||'—'}</span></td>
-    <td class="pr-2">${c.boards>0?`<span class="tag bg-accent/20 text-accent">${c.boards}板</span>`:'<span class="text-muted">—</span>'}</td>
-    <td class="pr-2 num text-up">+${c.pct}%</td>
-    <td class="pr-2 num">${c.vol_ratio?c.vol_ratio+'x':'—'}</td>
-    <td class="pr-2 num">${c.turn}%</td>
-    <td class="pr-2 num text-muted">${eYi(c.amount)}</td>
-    <td class="pr-2 num">${c.score}</td></tr>`).join('');
+    <td class="py-2 pr-2 font-medium" data-label="#${c.rank} 股票">${c.name||c.code}<span class="text-[10px] text-muted ml-1">${c.code.replace('.','')}</span></td>
+    <td class="pr-2" data-label="策略"><span class="tag ${styColor[c.strategy_type]||'bg-line/40 text-muted'}">${c.strategy_type||'—'}</span></td>
+    <td class="pr-2" data-label="连板">${c.boards>0?`<span class="tag bg-accent/20 text-accent">${c.boards}板</span>`:'<span class="text-muted">—</span>'}</td>
+    <td class="pr-2 num text-up" data-label="涨幅">+${c.pct}%</td>
+    <td class="pr-2 num" data-label="放量比">${c.vol_ratio?c.vol_ratio+'x':'—'}</td>
+    <td class="pr-2 num" data-label="换手">${c.turn}%</td>
+    <td class="pr-2 num text-muted" data-label="成交额">${eYi(c.amount)}</td>
+    <td class="pr-2 num" data-label="评分">${c.score}</td></tr>`).join('');
 }
 
 async function loadSentiment(){

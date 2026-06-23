@@ -28,7 +28,7 @@ from datetime import datetime
 import data_fetcher as dfetch
 
 # ----------------------------- 资金/持仓约束 -----------------------------
-MAX_POSITIONS = 3            # 同时最多持有
+MAX_POSITIONS = 5            # 同时最多持有（5×20%=满仓，资金利用率拉满）
 MAX_POSITION_PCT = 0.20      # 单票最大仓位
 
 # ----------------------------- 选股因子阈值 -----------------------------

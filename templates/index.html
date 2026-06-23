@@ -94,11 +94,11 @@ tailwind.config = {
         <table class="w-full text-xs sm:text-sm">
           <thead class="text-muted text-left">
             <tr class="border-b border-line">
-              <th class="py-2 pr-2">股票</th><th class="pr-2">成本</th><th class="pr-2">现价</th>
-              <th class="pr-2">浮盈</th><th class="pr-2">天数</th><th class="pr-2">可卖</th>
+              <th class="py-2 pr-2">股票</th><th class="pr-2">数量</th><th class="pr-2">成本价</th><th class="pr-2">现价</th>
+              <th class="pr-2">市值</th><th class="pr-2">浮盈</th><th class="pr-2">天数</th><th class="pr-2">可卖</th>
             </tr>
           </thead>
-          <tbody id="positions-body"><tr><td colspan="6" class="py-6 text-center text-muted">暂无持仓</td></tr></tbody>
+          <tbody id="positions-body"><tr><td colspan="8" class="py-6 text-center text-muted">暂无持仓</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -170,7 +170,7 @@ tailwind.config = {
           <thead class="text-muted text-left sticky top-0 bg-panel">
             <tr class="border-b border-line">
               <th class="py-2 pr-2">信号日</th><th class="pr-2">成交时间</th><th class="pr-2">方向</th>
-              <th class="pr-2">股票</th><th class="pr-2">价格</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
+              <th class="pr-2">股票</th><th class="pr-2">数量</th><th class="pr-2">价格</th><th class="pr-2">金额</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
             </tr>
           </thead>
           <tbody id="trades-body"></tbody>
@@ -178,6 +178,27 @@ tailwind.config = {
       </div>
     </section>
   </div>
+
+  <!-- Closed positions (清仓清单) -->
+  <section class="card p-4 mb-5">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <h2 class="font-semibold text-sm">清仓清单 <span class="text-muted text-xs">每笔已平仓回合的逐个标的盈亏与胜败</span></h2>
+      <div id="closed-summary" class="text-xs text-muted"></div>
+    </div>
+    <div class="overflow-x-auto max-h-96 overflow-y-auto">
+      <table class="w-full text-xs sm:text-sm">
+        <thead class="text-muted text-left sticky top-0 bg-panel">
+          <tr class="border-b border-line">
+            <th class="py-2 pr-2">胜败</th><th class="pr-2">股票</th><th class="pr-2">策略</th>
+            <th class="pr-2">数量</th><th class="pr-2">卖出价</th><th class="pr-2">卖出额</th>
+            <th class="pr-2">盈亏</th><th class="pr-2">收益率</th>
+            <th class="pr-2">信号→清仓</th><th class="pr-2">卖出理由</th>
+          </tr>
+        </thead>
+        <tbody id="closed-body"><tr><td colspan="10" class="py-6 text-center text-muted">暂无清仓记录</td></tr></tbody>
+      </table>
+    </div>
+  </section>
 
   <!-- Rejected orders -->
   <section class="card p-4 mb-5">
@@ -240,12 +261,14 @@ async function loadEquity(){
 async function loadPositions(){
   const data = await j('/api/positions');
   const tb=document.getElementById('positions-body');
-  if(!data.length){tb.innerHTML='<tr><td colspan="6" class="py-6 text-center text-muted">暂无持仓 · 弱势日空仓</td></tr>';return;}
+  if(!data.length){tb.innerHTML='<tr><td colspan="8" class="py-6 text-center text-muted">暂无持仓 · 弱势日空仓</td></tr>';return;}
   tb.innerHTML=data.map(p=>`<tr class="border-b border-line/40">
     <td class="py-2 pr-2"><div class="font-medium">${p.name||p.code}</div><div class="text-[10px] text-muted">${p.theme||''} · 信号${(p.signal_date||'').slice(5)}</div></td>
+    <td class="pr-2 num">${p.shares}</td>
     <td class="pr-2 num">${fmt(p.avg_cost)}</td>
     <td class="pr-2 num">${fmt(p.last_price)}</td>
-    <td class="pr-2 num ${colorCls(p.float_pnl)}">${sign(p.float_pnl_pct)}${p.float_pnl_pct}%</td>
+    <td class="pr-2 num">¥${fmt(p.market_value)}</td>
+    <td class="pr-2 num ${colorCls(p.float_pnl)}">${sign(p.float_pnl_pct)}${p.float_pnl_pct}%<div class="text-[10px]">${sign(p.float_pnl)}${fmt(p.float_pnl)}</div></td>
     <td class="pr-2 num">${p.days_held}天</td>
     <td class="pr-2">${p.can_sell?'<span class="text-down">✓</span>':'<span class="text-muted">T+1锁</span>'}</td></tr>`).join('');
 }
@@ -262,10 +285,37 @@ async function loadTrades(){
       <td class="pr-2 whitespace-nowrap num text-[11px]">${tm||(t.execute_date||t.trade_date||'').slice(5)}</td>
       <td class="pr-2"><span class="tag ${sideCls}">${t.side==='BUY'?'买入':'卖出'}</span></td>
       <td class="pr-2 whitespace-nowrap">${t.name||t.code}</td>
+      <td class="pr-2 num">${t.shares}</td>
       <td class="pr-2 num">${fmt(t.price)}</td>
+      <td class="pr-2 num">¥${fmt(t.amount)}</td>
       <td class="pr-2">${pnl}</td>
       <td class="pr-2 text-muted text-[11px]">${t.reason||''}</td></tr>`;
-  }).join('')||'<tr><td colspan="7" class="py-6 text-center text-muted">暂无交易</td></tr>';
+  }).join('')||'<tr><td colspan="9" class="py-6 text-center text-muted">暂无交易</td></tr>';
+}
+
+async function loadClosed(){
+  const d = await j('/api/closed');
+  const s=d.summary||{}, tb=document.getElementById('closed-body');
+  const sm=document.getElementById('closed-summary');
+  if(s.count){
+    const pf = s.profit_factor==null?'∞':s.profit_factor;
+    sm.innerHTML=`回合 <b>${s.count}</b> · 胜率 <b class="${colorCls(s.win_rate-50)}">${s.win_rate}%</b> `+
+      `(${s.win_count}胜/${s.loss_count}负) · 累计盈亏 <b class="num ${colorCls(s.total_pnl)}">${sign(s.total_pnl)}¥${fmt(s.total_pnl)}</b> · `+
+      `均盈<span class="text-up">+${s.avg_win_pct}%</span>/均亏<span class="text-down">${s.avg_loss_pct}%</span> · 盈亏比 ${pf}`;
+  } else { sm.textContent=''; }
+  const rs=d.rounds||[];
+  tb.innerHTML=rs.map(r=>`<tr class="border-b border-line/40">
+    <td class="py-2 pr-2">${r.win?'<span class="tag bg-up/20 text-up">胜</span>':'<span class="tag bg-down/20 text-down">负</span>'}</td>
+    <td class="pr-2 whitespace-nowrap">${r.name||r.code}</td>
+    <td class="pr-2 text-muted text-[11px]">${r.theme||''}</td>
+    <td class="pr-2 num">${r.shares}</td>
+    <td class="pr-2 num">${fmt(r.sell_price)}</td>
+    <td class="pr-2 num">¥${fmt(r.sell_amount)}</td>
+    <td class="pr-2 num ${colorCls(r.pnl)}">${sign(r.pnl)}¥${fmt(r.pnl)}</td>
+    <td class="pr-2 num ${colorCls(r.pnl_pct)}">${sign(r.pnl_pct)}${r.pnl_pct}%</td>
+    <td class="pr-2 text-muted text-[11px] whitespace-nowrap">${(r.signal_date||'').slice(5)}→${(r.close_date||'').slice(5)}</td>
+    <td class="pr-2 text-muted text-[11px]">${r.reason||''}</td></tr>`).join('')
+    ||'<tr><td colspan="10" class="py-6 text-center text-muted">暂无清仓记录</td></tr>';
 }
 
 async function loadCandidates(){
@@ -352,7 +402,7 @@ async function loadIndices(){
 function tick(){const d=new Date();document.getElementById('clock').textContent=d.toLocaleTimeString('zh-CN');}
 
 async function refresh(){
-  await Promise.all([loadOverview(),loadEquity(),loadPositions(),loadTrades(),
+  await Promise.all([loadOverview(),loadEquity(),loadPositions(),loadTrades(),loadClosed(),
     loadCandidates(),loadSentiment(),loadScanLog(),loadRejected(),loadIndices()]);
 }
 

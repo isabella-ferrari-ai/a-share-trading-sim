@@ -112,6 +112,47 @@ def api_trades():
     return jsonify(db.get_trades(300))
 
 
+@app.route("/api/closed")
+def api_closed():
+    """清仓清单：每笔已成交卖出即一次完整平仓回合，逐笔列出盈亏与胜败 + 汇总。"""
+    _select_db()
+    sells = [t for t in db.get_trades(99999)
+             if t["side"] == "SELL" and t["status"] == "FILLED"]
+    rounds = []
+    for t in sells:
+        amt = t.get("amount") or (t.get("price", 0) * t.get("shares", 0))
+        rounds.append({
+            "code": t["code"], "name": t.get("name"), "theme": t.get("theme"),
+            "shares": t.get("shares"), "sell_price": t.get("price"),
+            "sell_amount": round(amt, 2),
+            "open_date": t.get("open_date"), "signal_date": t.get("signal_date"),
+            "close_date": t.get("execute_date") or t.get("trade_date"),
+            "close_ts": t.get("ts"),
+            "pnl": round(t.get("pnl") or 0, 2),
+            "pnl_pct": round(t.get("pnl_pct") or 0, 2),
+            "win": (t.get("pnl") or 0) > 0,
+            "reason": t.get("reason", ""),
+        })
+    wins = [r for r in rounds if r["win"]]
+    losses = [r for r in rounds if not r["win"]]
+    total_pnl = sum(r["pnl"] for r in rounds)
+    gross_win = sum(r["pnl"] for r in wins)
+    gross_loss = -sum(r["pnl"] for r in losses)
+    return jsonify({
+        "rounds": rounds,
+        "summary": {
+            "count": len(rounds),
+            "win_count": len(wins),
+            "loss_count": len(losses),
+            "win_rate": round(len(wins) / len(rounds) * 100, 1) if rounds else 0,
+            "total_pnl": round(total_pnl, 2),
+            "avg_win_pct": round(sum(r["pnl_pct"] for r in wins) / len(wins), 2) if wins else 0,
+            "avg_loss_pct": round(sum(r["pnl_pct"] for r in losses) / len(losses), 2) if losses else 0,
+            "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+        },
+    })
+
+
 @app.route("/api/rejected")
 def api_rejected():
     _select_db()

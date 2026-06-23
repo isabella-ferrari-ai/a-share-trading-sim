@@ -217,9 +217,20 @@ def process_intraday(spot_df, panel, names, trade_date, theme_map=None, concept_
     regime, tradable = st.classify_sentiment(up)
     # 题材概念板块联动：各概念当日实时涨停家数
     concept_counts = st.count_concept_limitups_spot(spot_df, concept_map) if concept_map else {}
+    # 上证指数实时涨跌幅（腾讯指数源；失败则留空）
+    index_pct = index_open_pct = None
+    try:
+        for ix in dfetch.index_spot():
+            if ix["code"] == dfetch.INDEX_CODE:
+                index_pct = round(ix["pct"], 2) if ix.get("pct") is not None else None
+                if ix.get("open") and ix.get("preclose"):
+                    index_open_pct = round((ix["open"] / ix["preclose"] - 1) * 100, 2)
+                break
+    except Exception:
+        pass
     sentiment = {
         "trade_date": trade_date, "limit_up_count": up, "limit_down_count": dn,
-        "total_amount": amt_yi, "index_pct": None, "index_open_pct": None,
+        "total_amount": amt_yi, "index_pct": index_pct, "index_open_pct": index_open_pct,
         "regime": regime, "tradable": tradable,
         "note": f"盘中实时涨停{up}/跌停{dn}(样本{len(spot)}只)",
     }

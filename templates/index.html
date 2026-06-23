@@ -49,6 +49,9 @@ tailwind.config = {
     </div>
   </header>
 
+  <!-- Index ribbon (参考情绪宽基指数, 腾讯实时) -->
+  <section id="index-ribbon" class="flex flex-wrap gap-2 mb-5 text-xs"></section>
+
 
   <!-- KPI cards -->
   <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
@@ -166,7 +169,7 @@ tailwind.config = {
         <table class="w-full text-xs sm:text-sm">
           <thead class="text-muted text-left sticky top-0 bg-panel">
             <tr class="border-b border-line">
-              <th class="py-2 pr-2">信号日</th><th class="pr-2">成交日</th><th class="pr-2">方向</th>
+              <th class="py-2 pr-2">信号日</th><th class="pr-2">成交时间</th><th class="pr-2">方向</th>
               <th class="pr-2">股票</th><th class="pr-2">价格</th><th class="pr-2">盈亏</th><th class="pr-2">理由</th>
             </tr>
           </thead>
@@ -253,9 +256,10 @@ async function loadTrades(){
   tb.innerHTML=data.map(t=>{
     const sideCls=t.side==='BUY'?'bg-up/20 text-up':'bg-down/20 text-down';
     const pnl=t.side==='SELL'?`<span class="num ${colorCls(t.pnl)}">${sign(t.pnl_pct)}${t.pnl_pct}%</span>`:'<span class="text-muted">—</span>';
+    const tm=(t.ts||'').replace('T',' ').slice(5);  // MM-DD HH:MM:SS
     return `<tr class="border-b border-line/40">
       <td class="py-2 pr-2 text-muted whitespace-nowrap">${(t.signal_date||'').slice(5)||'—'}</td>
-      <td class="pr-2 whitespace-nowrap">${(t.execute_date||t.trade_date||'').slice(5)}</td>
+      <td class="pr-2 whitespace-nowrap num text-[11px]">${tm||(t.execute_date||t.trade_date||'').slice(5)}</td>
       <td class="pr-2"><span class="tag ${sideCls}">${t.side==='BUY'?'买入':'卖出'}</span></td>
       <td class="pr-2 whitespace-nowrap">${t.name||t.code}</td>
       <td class="pr-2 num">${fmt(t.price)}</td>
@@ -331,11 +335,25 @@ async function loadRejected(){
   }).join('');
 }
 
+async function loadIndices(){
+  let d; try{ d=await fetch('/api/indices').then(r=>r.json()); }catch(e){ return; }
+  const its=(d&&d.items)||[];
+  const el=document.getElementById('index-ribbon');
+  if(!its.length){el.innerHTML='<span class="text-muted">指数实时源暂不可用</span>';return;}
+  el.innerHTML=its.map(x=>{
+    const c=colorCls(x.pct);
+    return `<span class="card px-3 py-1.5 flex items-center gap-2">
+      <span class="text-muted">${x.name}</span>
+      <span class="num font-semibold">${fmt(x.price)}</span>
+      <span class="num ${c}">${sign(x.pct)}${x.pct==null?'—':x.pct}%</span></span>`;
+  }).join('');
+}
+
 function tick(){const d=new Date();document.getElementById('clock').textContent=d.toLocaleTimeString('zh-CN');}
 
 async function refresh(){
   await Promise.all([loadOverview(),loadEquity(),loadPositions(),loadTrades(),
-    loadCandidates(),loadSentiment(),loadScanLog(),loadRejected()]);
+    loadCandidates(),loadSentiment(),loadScanLog(),loadRejected(),loadIndices()]);
 }
 
 window.addEventListener('load',()=>{

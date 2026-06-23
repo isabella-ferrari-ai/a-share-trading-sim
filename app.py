@@ -141,6 +141,17 @@ def api_scan_log():
     return jsonify(db.get_scan_log(40))
 
 
+@app.route("/api/indices")
+def api_indices():
+    """参考情绪的 A 股宽基指数实时快照（腾讯源）。"""
+    import data_fetcher as dfetch
+    try:
+        items = dfetch.index_spot()
+    except Exception:
+        items = []
+    return jsonify({"items": items, "as_of": datetime.now().isoformat(timespec="seconds")})
+
+
 @app.route("/api/strategy")
 def api_strategy():
     _select_db()

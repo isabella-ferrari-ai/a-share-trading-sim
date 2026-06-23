@@ -30,6 +30,18 @@ PANEL_DB = os.path.join(BASE_DIR, "data", "panel.db")
 INDEX_CODE = "sh.000001"   # 上证指数
 KCB50_CODE = "sh.000688"   # 科创50（备用）
 
+# 参考情绪的 A 股宽基指数（看板指数条用，腾讯实时源）
+# (腾讯代码, 显示名, baostock代码)
+INDEX_BASKET = [
+    ("sh000001", "上证指数", "sh.000001"),
+    ("sz399001", "深证成指", "sz.399001"),
+    ("sz399006", "创业板指", "sz.399006"),
+    ("sh000300", "沪深300", "sh.000300"),
+    ("sh000905", "中证500", "sh.000905"),
+    ("sh000852", "中证1000", "sh.000852"),
+    ("sh000688", "科创50", "sh.000688"),
+]
+
 # baostock 日线字段
 K_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg,isST"
 NUM_COLS = ["open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg"]
@@ -590,6 +602,45 @@ def tx_spot(codes, batch=60, pause=0.05):
     df = pd.DataFrame(rows)
     df["bs_code"] = df["code"].apply(to_bs_code)
     return df
+
+
+def index_spot(basket=None):
+    """腾讯实时宽基指数快照（看板「参考情绪」指数条用）。
+    返回 [{code,name,price,pct,preclose,open,high,low,ts}, ...]，按 basket 顺序。失败返回 []。"""
+    basket = basket or INDEX_BASKET
+    raw = _tx_fetch_batch([tx for tx, _, _ in basket])
+    if not raw:
+        return []
+    parsed = {}
+    for line in raw.strip().split("\n"):
+        if "=" not in line or '"' not in line:
+            continue
+        body = line.split('"', 1)[1].rsplit('"', 1)[0]
+        p = body.split("~")
+        if len(p) < 35 or not p[2]:
+            continue
+
+        def _f(idx):
+            try:
+                return float(p[idx])
+            except Exception:
+                return None
+
+        parsed[p[2]] = {
+            "name": p[1], "price": _f(3), "preclose": _f(4), "open": _f(5),
+            "high": _f(33), "low": _f(34), "pct": _f(32),
+            "ts": p[30] if len(p) > 30 else None,
+        }
+    out = []
+    for tx, name, bs in basket:
+        six = tx[2:]  # 去掉 sh/sz 前缀，对应腾讯返回的 p[2]
+        q = parsed.get(six)
+        if not q:
+            continue
+        out.append({"code": bs, "name": name, "price": q["price"], "pct": q["pct"],
+                    "preclose": q["preclose"], "open": q["open"],
+                    "high": q["high"], "low": q["low"], "ts": q["ts"]})
+    return out
 
 
 def universe_codes(path=PANEL_DB):

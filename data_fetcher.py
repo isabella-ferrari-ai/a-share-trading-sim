@@ -377,6 +377,26 @@ def panel_dates(path=PANEL_DB):
     return [r[0] for r in rows]
 
 
+def clear_fetch_meta(end, path=PANEL_DB):
+    """清除指定 end 日的断点续传标记，强制下次 build_panel 对该 end 全量重抓。
+    解决：收盘后当日日线尚未发布时的首次抓取，会把全市场标记为 (code,start,end) 已抓，
+    导致 baostock 稍后发布当日日线后，重建仍命中缓存跳过、当日 bar 永远进不来。"""
+    conn = _panel_conn(path)
+    conn.execute("DELETE FROM fetch_meta WHERE end=?", (end,))
+    conn.commit()
+    conn.close()
+
+
+def remote_has_date(td, ref_code=INDEX_CODE):
+    """廉价探测 baostock 是否已发布 td 当日日线（单一参考标的，避免无谓全量重抓）。"""
+    try:
+        with bs_session():
+            df = _kdata(ref_code, td, td, adjust="3")
+    except Exception:
+        return False
+    return (df is not None) and (not df.empty) and (td in set(df["date"].astype(str)))
+
+
 # --------------------------------------------------------------------------
 # 概念板块映射（东方财富/同花顺 push 接口在本环境被墙，改用新浪概念板块）
 # --------------------------------------------------------------------------

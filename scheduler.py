@@ -141,6 +141,10 @@ def settle_close(td):
     logs = db.get_scan_log(20)
     if any(l["phase"] == "收盘结算" and l["trade_date"] == td for l in logs):
         return
+    # baostock 已发布当日日线但本地面板尚无 → 断点续传缓存过期，清掉以强制重抓
+    if td not in set(dfetch.panel_dates()) and dfetch.remote_has_date(td):
+        dfetch.clear_fetch_meta(td)
+        db.log_scan("缓存刷新", f"{td} 日线已发布，清断点缓存强制重抓", trade_date=td)
     _ensure_recent_panel(td, force=True)
     if td not in set(dfetch.panel_dates()):
         db.log_scan("等待数据", f"{td} 日线未就绪(收盘后约15:30更新)，稍后重试", trade_date=td)

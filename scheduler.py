@@ -15,8 +15,13 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os
+import socket
 import time
 from datetime import datetime, timedelta
+
+# 全局 socket 超时：防止 baostock 等阻塞式网络读卡死单线程扫描循环（曾整夜挂死）。
+# 超时会抛异常，被 build_panel / scan_once 的 try/except 捕获并记日志，下个周期重试。
+socket.setdefaulttimeout(60)
 
 import database as db
 import data_fetcher as dfetch

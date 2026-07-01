@@ -173,6 +173,14 @@ def settle_close(td):
             db.log_scan("概念刷新", f"{td} 概念板块映射已更新 {n} 只", trade_date=td)
         except Exception as e:
             db.log_scan("概念刷新异常", f"{repr(e)[:120]}", trade_date=td)
+    # 净值曲线的六大指数同期对比：刷新 index_history.json（自管 bs_session）
+    try:
+        n_bench, last_bench = dfetch.refresh_bench_history(SIM_START, td)
+        db.log_scan("指数对比",
+                    f"{td} 净值对比指数已刷新 {n_bench}只 截止{last_bench} "
+                    f"(baostock日线收盘,科创50新浪)", trade_date=td)
+    except Exception as e:
+        db.log_scan("指数对比", f"{td} 刷新净值对比指数失败: {e}", trade_date=td)
 
 
 def scan_once():

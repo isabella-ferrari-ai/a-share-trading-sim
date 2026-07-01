@@ -58,6 +58,9 @@ def api_overview():
     for e in curve:
         peak = max(peak, e["total_equity"])
         mdd = min(mdd, e["total_equity"] / peak - 1)
+    _scan = db.get_scan_log(1)
+    last_scan = _scan[0]["ts"] if _scan else None
+    last_scan_msg = _scan[0].get("message") if _scan else None
     return jsonify({
         "db": which,
         "cash": round(acct["cash"], 2),
@@ -76,6 +79,8 @@ def api_overview():
         "avg_loss_pct": round(avg_loss, 2),
         "max_drawdown": round(mdd * 100, 2),
         "updated_at": acct.get("updated_at"),
+        "last_scan": last_scan,
+        "last_scan_msg": last_scan_msg,
     })
 
 
@@ -83,6 +88,18 @@ def api_overview():
 def api_equity():
     _select_db()
     return jsonify(db.get_equity_curve())
+
+
+@app.route("/api/bench")
+def api_bench():
+    """净值曲线的六大指数同期对比数据（真实收盘价，前端按净值起始日归一化叠加）。
+    由调度器每日收盘后刷新到 data/index_history.json；与 live/backtest 无关。"""
+    import json as _json
+    path = os.path.join(BASE_DIR, "data", "index_history.json")
+    if not os.path.exists(path):
+        return jsonify({"indices": {}, "source": "", "updated": ""})
+    with open(path, encoding="utf-8") as f:
+        return jsonify(_json.load(f))
 
 
 @app.route("/api/positions")

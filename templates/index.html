@@ -100,7 +100,8 @@ tailwind.config = {
       <h2 class="font-semibold text-sm">资产净值曲线</h2>
       <div class="text-xs text-muted">已实现 <span id="realized" class="num">—</span> · 浮动 <span id="floating" class="num">—</span></div>
     </div>
-    <div id="equity-chart" style="height:300px"></div>
+    <div id="equity-chart" style="height:330px"></div>
+    <div id="equity-cap" class="text-[10px] text-muted mt-1 leading-snug"></div>
   </section>
 
   <div class="grid lg:grid-cols-2 gap-5 mb-5">
@@ -224,7 +225,7 @@ tailwind.config = {
   </section>
 
   <footer class="text-center text-muted text-[11px] py-4">
-    模拟盘仅用于策略演示，非投资建议 · 股票池：沪深300+中证500+中证1000成分股 · 数据源 baostock 日线 · 更新于 <span id="updated">—</span>
+    模拟盘仅用于策略演示，非投资建议 · 股票池：沪深300+中证500+中证1000成分股 · 数据源 baostock 日线 · 最近扫描 <span id="updated">—</span> · 结算 <span id="settled">—</span>
   </footer>
 </div>
 
@@ -253,26 +254,58 @@ async function loadOverview(){
   document.getElementById('kpi-wl').textContent='均盈 '+sign(d.avg_win_pct)+d.avg_win_pct+'% / 均亏 '+d.avg_loss_pct+'%';
   const rz=document.getElementById('realized'); rz.textContent='¥'+fmt(d.realized_pnl); rz.className='num '+colorCls(d.realized_pnl);
   const fl=document.getElementById('floating'); fl.textContent='¥'+fmt(d.floating_pnl); fl.className='num '+colorCls(d.floating_pnl);
-  document.getElementById('updated').textContent=d.updated_at||'—';
+  document.getElementById('updated').textContent=(d.last_scan||d.updated_at||'—').replace('T',' ');
+  const settledEl=document.getElementById('settled'); if(settledEl) settledEl.textContent=(d.updated_at||'—').replace('T',' ');
 }
 
+// 六大指数按净值起始日归一化到相同起点（收盘价），叠加到净值曲线做同期对比
+const BENCH_ORDER=['上证指数','沪深300','中证500','中证1000','科创50','创业板指'];
+const BENCH_COLORS={'上证指数':'#eab308','沪深300':'#ef4444','中证500':'#a78bfa','中证1000':'#22c55e','科创50':'#ec4899','创业板指':'#2dd4bf'};
 async function loadEquity(){
   const data = await j('/api/equity');
   const dates = data.map(x=>x.trade_date);
   const eq = data.map(x=>x.total_equity);
+  const baseEq = eq.length ? eq[0] : 1000000;
+  let bench={indices:{},source:'',updated:''};
+  try{ bench = await fetch('/api/bench').then(r=>r.json()); }catch(e){}
+  const idx = bench.indices||{};
+  const dset = new Set(dates);
+  // 归一化：把指数序列 rebase 到净值起始日(=起始资金100万)，缺失交易日 ffill，不编造
+  function rebase(arr){
+    const inR = arr.filter(p=>dset.has(p.date));
+    const src = inR.length ? inR : arr;
+    if(!src.length) return null;
+    const b = src[0].close; if(!b) return null;
+    const m={}; src.forEach(p=>{ m[p.date]=p.close; });
+    let last=null;
+    return dates.map(dt=>{ if(m[dt]!=null) last=m[dt]; return last!=null ? +(baseEq*last/b).toFixed(2) : null; });
+  }
+  const STRAT='本策略净值';
+  const series=[{name:STRAT,type:'line',data:eq,smooth:true,symbol:'none',z:5,
+    lineStyle:{color:'#fa8c16',width:2.5},
+    areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(250,140,22,.30)'},{offset:1,color:'rgba(250,140,22,0)'}])},
+    markLine:{silent:true,symbol:'none',lineStyle:{color:'#8a96ab',type:'dashed'},
+      data:[{yAxis:1000000,label:{formatter:'初始100万',color:'#8a96ab',fontSize:10}}]}}];
+  const legendNames=[STRAT];
+  BENCH_ORDER.forEach(nm=>{
+    if(!idx[nm]) return;
+    const d=rebase(idx[nm]); if(!d) return;
+    series.push({name:nm,type:'line',data:d,smooth:true,symbol:'none',connectNulls:true,z:2,
+      lineStyle:{color:BENCH_COLORS[nm],width:1,opacity:.8}});
+    legendNames.push(nm);
+  });
   equityChart.setOption({
     tooltip:{trigger:'axis',backgroundColor:'#121826',borderColor:'#26304a',textStyle:{color:'#e6edf7'},
-      formatter:p=>{const x=p[0];return x.axisValue+'<br/>总资产 ¥'+fmt(x.data);}},
-    grid:{left:60,right:20,top:20,bottom:30},
+      valueFormatter:v=>v==null?'—':'¥'+fmt(v)},
+    legend:{top:0,type:'scroll',textStyle:{color:'#8a96ab',fontSize:10},inactiveColor:'#3a475f',data:legendNames},
+    grid:{left:60,right:20,top:34,bottom:30},
     xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:'#26304a'}},axisLabel:{color:'#8a96ab',fontSize:10}},
     yAxis:{type:'value',scale:true,axisLabel:{color:'#8a96ab',fontSize:10,formatter:v=>(v/1e4).toFixed(0)+'万'},
       splitLine:{lineStyle:{color:'#1a2234'}}},
-    series:[{type:'line',data:eq,smooth:true,symbol:'none',
-      lineStyle:{color:'#fa8c16',width:2.5},
-      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(250,140,22,.35)'},{offset:1,color:'rgba(250,140,22,0)'}])},
-      markLine:{silent:true,symbol:'none',lineStyle:{color:'#8a96ab',type:'dashed'},
-        data:[{yAxis:1000000,label:{formatter:'初始100万',color:'#8a96ab',fontSize:10}}]}}]
-  });
+    series
+  }, true);
+  const cap=document.getElementById('equity-cap');
+  if(cap) cap.textContent='六大指数按本策略起始日('+(dates[0]||'—')+')归一化到相同起点(收盘价,可点击图例开关) · 数据源'+(bench.source||'baostock指数日线')+' · 截止'+(bench.updated||'—');
 }
 
 async function loadPositions(){

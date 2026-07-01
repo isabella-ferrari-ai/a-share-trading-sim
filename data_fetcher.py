@@ -42,6 +42,18 @@ INDEX_BASKET = [
     ("sh000688", "科创50", "sh.000688"),
 ]
 
+# 净值曲线对比用：振威指定的六大宽基指数（展示名 -> baostock 代码）
+# baostock 无科创50(sh.000688)指数日线(返回空)，回退新浪指数日线(akshare stock_zh_index_daily)。
+BENCH_INDICES = [
+    ("上证指数", "sh.000001"),
+    ("沪深300", "sh.000300"),
+    ("中证500", "sh.000905"),
+    ("中证1000", "sh.000852"),
+    ("科创50", "sh.000688"),
+    ("创业板指", "sz.399006"),
+]
+BENCH_HISTORY_PATH = os.path.join(BASE_DIR, "data", "index_history.json")
+
 # baostock 日线字段
 K_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg,isST"
 NUM_COLS = ["open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg"]
@@ -142,6 +154,68 @@ def get_trade_dates(start, end):
     if df.empty:
         return []
     return df[df["is_trading_day"] == "1"]["calendar_date"].tolist()
+
+
+def _ak_index_daily(symbol, start, end):
+    """新浪指数日线回退（baostock 无该指数日线时，如 科创50）。symbol 如 sh000688。
+    数据源：akshare stock_zh_index_daily（新浪），真实收盘价。"""
+    import akshare as ak
+    k = ak.stock_zh_index_daily(symbol=symbol)
+    k["date"] = k["date"].astype(str)
+    k = k[(k["date"] >= start) & (k["date"] <= end)]
+    return [{"date": str(r["date"]), "close": float(r["close"])}
+            for _, r in k.iterrows() if pd.notna(r["close"])]
+
+
+def fetch_bench_history(start, end):
+    """拉六大宽基指数日线收盘价（需已在 bs_session 内）。
+    返回 (indices, sources)：indices={展示名:[{date,close}]}, sources={展示名:'baostock'|'sina'}。
+    数据诚实：全部真实收盘价(不复权)；baostock 为主，返回空则回退新浪(akshare)，
+    仍失败则该指数留空不编造。"""
+    out, srcs = {}, {}
+    for nm, code in BENCH_INDICES:
+        rows = []
+        try:
+            df = get_index(start, end, code=code)
+            if df is not None and not df.empty:
+                rows = [{"date": str(r["date"]), "close": float(r["close"])}
+                        for _, r in df.iterrows() if pd.notna(r["close"])]
+                if rows:
+                    srcs[nm] = "baostock"
+        except Exception as e:
+            print("[bench] baostock", nm, "err", e)
+        if not rows:  # baostock 空(科创50) -> 新浪指数日线回退
+            try:
+                rows = _ak_index_daily(code.replace(".", ""), start, end)
+                if rows:
+                    srcs[nm] = "sina"
+            except Exception as e:
+                print("[bench] sina", nm, "err", e)
+        if rows:
+            out[nm] = rows
+    return out, srcs
+
+
+def refresh_bench_history(start, end, td=None, path=None):
+    """拉六大指数日线并写 index_history.json（自管 bs_session；供调度器/CLI 调用）。
+    返回 (指数数量, 数据截止日)。前端读该文件把指数按净值起始日归一化叠加到净值曲线。"""
+    path = path or BENCH_HISTORY_PATH
+    with bs_session():
+        indices, srcs = fetch_bench_history(start, end)
+    last = ""
+    for rows in indices.values():
+        if rows:
+            last = max(last, rows[-1]["date"])
+    sina = [nm for nm, s in srcs.items() if s == "sina"]
+    source = "baostock 指数日线收盘价(不复权)"
+    if sina:
+        source += "；" + "/".join(sina) + " 用新浪指数日线"
+    payload = {"updated": last or (td or ""), "source": source,
+               "sources": srcs, "indices": indices}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    return len(indices), last
 
 
 def get_all_basics():
@@ -800,6 +874,11 @@ if __name__ == "__main__":
         print("spot source:", src, "rows:", len(df))
         if not df.empty:
             print(df.head(5).to_string())
+    elif len(sys.argv) >= 2 and sys.argv[1] == "bench":
+        s = sys.argv[2] if len(sys.argv) > 2 else "2026-06-22"
+        e = sys.argv[3] if len(sys.argv) > 3 else pd.Timestamp("now").strftime("%Y-%m-%d")
+        n, last = refresh_bench_history(s, e)
+        print(f"[bench] {n} 只指数日线已写入 {BENCH_HISTORY_PATH} (截止 {last})")
     else:
         with bs_session():
             print("trade dates sample:", get_trade_dates("2025-07-01", "2025-07-10"))
